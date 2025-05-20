@@ -28,11 +28,12 @@
       y: 0,
       radius: 30,
       color: 'yellow',
-      mass: 10000 // Large mass for the sun
+      mass: 1000000 // Much larger mass for the sun to dominate gravitational effects
     };
 
     // Physics constants
     const G = 0.1; // Gravitational constant (scaled for game physics)
+    const TIME_SCALE = 0.01; // Slow down the simulation (1.0 = normal speed, lower = slower)
     
     // Calculate mass based on radius (assuming density is constant)
     function calculateMass(radius) {
@@ -130,16 +131,41 @@
     
     // Apply gravitational forces and update positions
     function updatePhysics(dt) {
-      // Apply sun's gravity to all planets
+      // Store forces for each planet to avoid immediate position updates affecting other calculations
+      const forces = [];
+      for (let i = 0; i < planets.length; i++) {
+        forces.push({ fx: 0, fy: 0 });
+      }
+      
+      // Calculate all gravitational forces
+      // 1. Sun's gravity on all planets
+      for (let i = 0; i < planets.length; i++) {
+        const planet = planets[i];
+        const { fx, fy } = calculateGravity(planet, sun);
+        forces[i].fx += fx;
+        forces[i].fy += fy;
+      }
+      
+      // 2. Inter-planetary gravity (each planet affects all other planets)
+      for (let i = 0; i < planets.length; i++) {
+        for (let j = i + 1; j < planets.length; j++) {  // Only calculate each pair once
+          const { fx, fy } = calculateGravity(planets[i], planets[j]);
+          
+          // Apply Newton's third law: equal and opposite forces
+          forces[i].fx += fx;
+          forces[i].fy += fy;
+          forces[j].fx -= fx;  // Opposite direction for the other planet
+          forces[j].fy -= fy;
+        }
+      }
+      
+      // Apply forces to update planet velocities and positions
       for (let i = 0; i < planets.length; i++) {
         const planet = planets[i];
         
-        // Calculate gravitational force from sun
-        const { fx, fy } = calculateGravity(planet, sun);
-        
         // Apply acceleration (F = ma, so a = F/m)
-        const ax = fx / planet.mass;
-        const ay = fy / planet.mass;
+        const ax = forces[i].fx / planet.mass;
+        const ay = forces[i].fy / planet.mass;
         
         // Update velocity based on acceleration
         planet.vx += ax * dt;
@@ -186,7 +212,7 @@
       ctx.setTransform(scale, 0, 0, scale, canvas.width / 2 + offsetX, canvas.height / 2 + offsetY);
 
       // Update physics (with small time step for stability)
-      const dt = 0.5;
+      const dt = TIME_SCALE; // Apply time scale to slow down simulation
       updatePhysics(dt);
       
       // Draw everything
