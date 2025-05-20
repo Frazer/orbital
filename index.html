@@ -27,15 +27,52 @@
       x: 0,
       y: 0,
       radius: 30,
-      color: 'yellow'
+      color: 'yellow',
+      mass: 10000 // Large mass for the sun
     };
 
-    const planets = [
-      { radius: 5, orbitRadius: 120, orbitSpeed: 0.02 * 0.25, angle: 0, color: 'gray' },
-      { radius: 8, orbitRadius: 200, orbitSpeed: 0.01 * 0.25, angle: 1, color: 'blue' },
-      { radius: 6, orbitRadius: 320, orbitSpeed: 0.007 * 0.25, angle: 2, color: 'red' },
-      { radius: 10, orbitRadius: 440, orbitSpeed: 0.004 * 0.25, angle: 3, color: 'orange' }
+    // Physics constants
+    const G = 0.1; // Gravitational constant (scaled for game physics)
+    
+    // Calculate mass based on radius (assuming density is constant)
+    function calculateMass(radius) {
+      return Math.pow(radius, 3) * 0.5; // Scale factor for game physics
+    }
+    
+    // Calculate orbital velocity for a circular orbit
+    function calculateOrbitalVelocity(centralMass, orbitRadius) {
+      // For a circular orbit: v = sqrt(G * M / r)
+      return Math.sqrt(G * centralMass / orbitRadius);
+    }
+    
+    // Initialize planets with position, velocity and mass
+    const planets = [];
+    
+    // Planet data: radius, distance from sun, color
+    const planetData = [
+      { radius: 5, distance: 120, color: 'gray' },
+      { radius: 8, distance: 200, color: 'blue' },
+      { radius: 6, distance: 320, color: 'red' },
+      { radius: 10, distance: 440, color: 'orange' }
     ];
+    
+    // Create planets with proper orbital velocities
+    for (const data of planetData) {
+      const mass = calculateMass(data.radius);
+      const orbitalVelocity = calculateOrbitalVelocity(sun.mass, data.distance);
+      
+      planets.push({
+        radius: data.radius,
+        x: data.distance, // Start along positive x-axis
+        y: 0,
+        vx: 0,
+        vy: orbitalVelocity, // Velocity in y direction for circular orbit
+        color: data.color,
+        mass: mass
+      });
+      
+      console.log(`Planet ${data.color}: orbital velocity = ${orbitalVelocity.toFixed(2)} at distance ${data.distance}`);
+    }
 
     let rocketAngle = 0;
     let rocketRotation = 0;
@@ -52,15 +89,12 @@
     }
 
     function drawPlanet(planet) {
-      const x = Math.cos(planet.angle) * planet.orbitRadius;
-      const y = Math.sin(planet.angle) * planet.orbitRadius;
-
       ctx.beginPath();
-      ctx.arc(x, y, planet.radius, 0, Math.PI * 2);
+      ctx.arc(planet.x, planet.y, planet.radius, 0, Math.PI * 2);
       ctx.fillStyle = planet.color;
       ctx.fill();
 
-      return { x, y };
+      return { x: planet.x, y: planet.y };
     }
 
     function drawRocket() {
@@ -77,19 +111,111 @@
         ctx.restore();
       }
 
+    // Calculate gravitational force between two bodies
+    function calculateGravity(body1, body2) {
+      const dx = body2.x - body1.x;
+      const dy = body2.y - body1.y;
+      const distSq = dx * dx + dy * dy;
+      const dist = Math.sqrt(distSq);
+      
+      // Force magnitude (Newton's law of universal gravitation)
+      const force = G * body1.mass * body2.mass / distSq;
+      
+      // Force components
+      const fx = force * dx / dist;
+      const fy = force * dy / dist;
+      
+      return { fx, fy };
+    }
+    
+    // Apply gravitational forces and update positions
+    function updatePhysics(dt) {
+      // Apply sun's gravity to all planets
+      for (let i = 0; i < planets.length; i++) {
+        const planet = planets[i];
+        
+        // Calculate gravitational force from sun
+        const { fx, fy } = calculateGravity(planet, sun);
+        
+        // Apply acceleration (F = ma, so a = F/m)
+        const ax = fx / planet.mass;
+        const ay = fy / planet.mass;
+        
+        // Update velocity based on acceleration
+        planet.vx += ax * dt;
+        planet.vy += ay * dt;
+        
+        // Update position based on velocity
+        planet.x += planet.vx * dt;
+        planet.y += planet.vy * dt;
+      }
+      
+      // Calculate rocket physics
+      if (rocketX !== 0 || rocketY !== 0) {
+        // Apply sun's gravity to rocket
+        const rocketMass = 1; // Small mass for the rocket
+        const rocket = { x: rocketX, y: rocketY, mass: rocketMass };
+        const { fx: sunFx, fy: sunFy } = calculateGravity(rocket, sun);
+        
+        // Apply acceleration from sun
+        const sunAx = sunFx / rocketMass;
+        const sunAy = sunFy / rocketMass;
+        rocketVx += sunAx * dt;
+        rocketVy += sunAy * dt;
+        
+        // Apply planets' gravity to rocket
+        for (let i = 0; i < planets.length; i++) {
+          const planet = planets[i];
+          const { fx, fy } = calculateGravity(rocket, planet);
+          const ax = fx / rocketMass;
+          const ay = fy / rocketMass;
+          rocketVx += ax * dt;
+          rocketVy += ay * dt;
+        }
+        
+        // Update rocket position
+        rocketX += rocketVx * dt;
+        rocketY += rocketVy * dt;
+      }
+    }
+    
     function update() {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       ctx.setTransform(scale, 0, 0, scale, canvas.width / 2 + offsetX, canvas.height / 2 + offsetY);
 
+      // Update physics (with small time step for stability)
+      const dt = 0.5;
+      updatePhysics(dt);
+      
+      // Draw everything
       drawSun();
 
       for (let i = 0; i < planets.length; i++) {
-        const planet = planets[i];
-        const { x: planetX, y: planetY } = drawPlanet(planet);
-        planet.angle += planet.orbitSpeed;
+        drawPlanet(planets[i]);
+      }
 
+      // Set rocket initial position near blue planet if not initialized
+      if (rocketX === 0 && rocketY === 0) {
+        // Find blue planet
+        const bluePlanet = planets.find(p => p.color === 'blue');
+        if (bluePlanet) {
+          // Position rocket near blue planet
+          const orbitDist = bluePlanet.radius + 20;
+          rocketX = bluePlanet.x + orbitDist;
+          rocketY = bluePlanet.y;
+          
+          // Set initial velocity for orbit - use proper orbital velocity
+          const bluePlanetDistance = Math.sqrt(bluePlanet.x * bluePlanet.x + bluePlanet.y * bluePlanet.y);
+          const rocketOrbitRadius = bluePlanetDistance + orbitDist;
+          const rocketOrbitSpeed = calculateOrbitalVelocity(bluePlanet.mass, orbitDist);
+          
+          // Set velocity perpendicular to radius vector for circular orbit
+          const angleToCenter = Math.atan2(bluePlanet.y - rocketY, bluePlanet.x - rocketX);
+          rocketVx = -rocketOrbitSpeed * Math.sin(angleToCenter);
+          rocketVy = rocketOrbitSpeed * Math.cos(angleToCenter);
+        }
       }
 
       drawRocket();
