@@ -101,14 +101,29 @@
     function drawRocket() {
         ctx.save();
         ctx.translate(rocketX, rocketY);
+        // Rotate so the rocket points in the direction of travel
         ctx.rotate(rocketRotation);
+        
+        // Draw rocket with point facing upward (which is the direction of travel after rotation)
         ctx.beginPath();
-        ctx.moveTo(0, -6);
-        ctx.lineTo(-4, 4);
-        ctx.lineTo(4, 4);
+        ctx.moveTo(0, -8); // Nose of rocket (forward direction)
+        ctx.lineTo(-4, 4);  // Bottom left corner
+        ctx.lineTo(4, 4);   // Bottom right corner
         ctx.closePath();
         ctx.fillStyle = 'white';
         ctx.fill();
+        
+        // Draw a small flame when thrusting
+        if (keys['ArrowUp']) {
+          ctx.beginPath();
+          ctx.moveTo(-2, 4);  // Left side of rocket bottom
+          ctx.lineTo(0, 12);   // Flame tip
+          ctx.lineTo(2, 4);   // Right side of rocket bottom
+          ctx.closePath();
+          ctx.fillStyle = 'orange';
+          ctx.fill();
+        }
+        
         ctx.restore();
       }
 
@@ -246,11 +261,16 @@
 
       drawRocket();
 
+      // Handle rocket controls
       if (keys['ArrowLeft']) rocketRotation -= 0.05;
       if (keys['ArrowRight']) rocketRotation += 0.05;
       if (keys['ArrowUp']) {
-        rocketVx += Math.cos(rocketRotation) * 0.05;
-        rocketVy += Math.sin(rocketRotation) * 0.05;
+        // Apply thrust in the direction the rocket is pointing
+        // In canvas, rotation of 0 is east (right), but we want 0 to be north (up)
+        // So we need to subtract PI/2 (90 degrees) from the rotation angle
+        const thrustAngle = rocketRotation - Math.PI/2;
+        rocketVx += Math.cos(thrustAngle) * 0.5;
+        rocketVy += Math.sin(thrustAngle) * 0.5;
       }
 
       requestAnimationFrame(update);
