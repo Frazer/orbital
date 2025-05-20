@@ -34,6 +34,7 @@
     // Physics constants
     const G = 0.1; // Gravitational constant (scaled for game physics)
     const TIME_SCALE = 0.01; // Slow down the simulation (1.0 = normal speed, lower = slower)
+    const planetGravityFactor = 800; // 5000; // Extremely strong planet gravity influence on rocket
     
     // Calculate mass based on radius (assuming density is constant)
     function calculateMass(radius) {
@@ -76,11 +77,12 @@
     }
 
     let rocketAngle = 0;
-    let rocketRotation = 0;
+    let rocketRotation = Math.PI; // Start facing down (PI radians = 180 degrees)
     let rocketVx = 0;
     let rocketVy = 0;
     let rocketX = 0;
     let rocketY = 0;
+    const rocketMass = 20; // Lower mass to be more affected by gravity
     
     function drawSun() {
       ctx.beginPath();
@@ -128,14 +130,23 @@
       }
 
     // Calculate gravitational force between two bodies
+    // with special handling for rocket-planet interactions
     function calculateGravity(body1, body2) {
       const dx = body2.x - body1.x;
       const dy = body2.y - body1.y;
       const distSq = dx * dx + dy * dy;
       const dist = Math.sqrt(distSq);
       
+      // Special case: if one of the bodies is the rocket and the other is a planet
+      let gravityMultiplier = 1;
+      
+      // Check if body1 is the rocket (by checking for rocketMass) and body2 is not the sun
+      if (body1.mass === rocketMass && body2.mass < sun.mass) {
+        gravityMultiplier = planetGravityFactor;
+      }
+      
       // Force magnitude (Newton's law of universal gravitation)
-      const force = G * body1.mass * body2.mass / distSq;
+      const force = G * body1.mass * body2.mass * gravityMultiplier / distSq;
       
       // Force components
       const fx = force * dx / dist;
@@ -191,28 +202,32 @@
         planet.y += planet.vy * dt;
       }
       
-      // Calculate rocket physics
+      // Calculate rocket physics - rocket experiences gravity but doesn't affect planets
       if (rocketX !== 0 || rocketY !== 0) {
-        // Apply sun's gravity to rocket
-        const rocketMass = 1; // Small mass for the rocket
         const rocket = { x: rocketX, y: rocketY, mass: rocketMass };
-        const { fx: sunFx, fy: sunFy } = calculateGravity(rocket, sun);
+        let totalFx = 0;
+        let totalFy = 0;
         
-        // Apply acceleration from sun
-        const sunAx = sunFx / rocketMass;
-        const sunAy = sunFy / rocketMass;
-        rocketVx += sunAx * dt;
-        rocketVy += sunAy * dt;
+        // Apply sun's gravity to rocket
+        const { fx: sunFx, fy: sunFy } = calculateGravity(rocket, sun);
+        totalFx += sunFx;
+        totalFy += sunFy;
         
         // Apply planets' gravity to rocket
         for (let i = 0; i < planets.length; i++) {
           const planet = planets[i];
           const { fx, fy } = calculateGravity(rocket, planet);
-          const ax = fx / rocketMass;
-          const ay = fy / rocketMass;
-          rocketVx += ax * dt;
-          rocketVy += ay * dt;
+          totalFx += fx;
+          totalFy += fy;
         }
+        
+        // Apply acceleration (F = ma, so a = F/m)
+        const ax = totalFx / rocketMass;
+        const ay = totalFy / rocketMass;
+        
+        // Update velocity based on acceleration
+        rocketVx += ax * dt;
+        rocketVy += ay * dt;
         
         // Update rocket position
         rocketX += rocketVx * dt;
@@ -247,15 +262,18 @@
           rocketX = bluePlanet.x + orbitDist;
           rocketY = bluePlanet.y;
           
-          // Set initial velocity for orbit - use proper orbital velocity
-          const bluePlanetDistance = Math.sqrt(bluePlanet.x * bluePlanet.x + bluePlanet.y * bluePlanet.y);
-          const rocketOrbitRadius = bluePlanetDistance + orbitDist;
-          const rocketOrbitSpeed = calculateOrbitalVelocity(bluePlanet.mass, orbitDist);
+          // Calculate proper orbital velocity around the blue planet using Kepler's laws
+          // This uses the enhanced planet gravity factor to match the simulation
+          const enhancedPlanetMass = bluePlanet.mass * planetGravityFactor;
+          const rocketOrbitSpeed = calculateOrbitalVelocity(enhancedPlanetMass, orbitDist);
+          console.log(`Rocket orbital velocity: ${rocketOrbitSpeed} around planet with mass ${enhancedPlanetMass}`);
           
-          // Set velocity perpendicular to radius vector for circular orbit
-          const angleToCenter = Math.atan2(bluePlanet.y - rocketY, bluePlanet.x - rocketX);
-          rocketVx = -rocketOrbitSpeed * Math.sin(angleToCenter);
-          rocketVy = rocketOrbitSpeed * Math.cos(angleToCenter);
+          // The rocket should orbit clockwise (to match downward orientation)
+          // For a rocket positioned to the right of the planet, velocity should be downward
+          // Apply a speed multiplier to make it faster than a perfect circular orbit
+          const speedMultiplier = 1.5; // Start 50% faster than orbital velocity
+          rocketVx = 0;
+          rocketVy = rocketOrbitSpeed * speedMultiplier; // Positive Y is downward in canvas coordinates
         }
       }
 
