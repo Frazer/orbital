@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Orbiting Planets</title>
+  <style>
+    body { margin: 0; background: black; overflow: hidden; }
+    canvas { display: block; cursor: grab; }
+  </style>
+</head>
+<body>
+  <canvas id="solarSystem"></canvas>
+  <script>
+    const canvas = document.getElementById('solarSystem');
+    const ctx = canvas.getContext('2d');
+
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    let scale = 1;
+    let offsetX = 0;
+    let offsetY = 0;
+    let isDragging = false;
+    let lastX, lastY;
+
+    const sun = {
+      x: 0,
+      y: 0,
+      radius: 30,
+      color: 'yellow'
+    };
+
+    const planets = [
+      { radius: 5, orbitRadius: 120, orbitSpeed: 0.02 * 0.25, angle: 0, color: 'gray' },
+      { radius: 8, orbitRadius: 200, orbitSpeed: 0.01 * 0.25, angle: 1, color: 'blue' },
+      { radius: 6, orbitRadius: 320, orbitSpeed: 0.007 * 0.25, angle: 2, color: 'red' },
+      { radius: 10, orbitRadius: 440, orbitSpeed: 0.004 * 0.25, angle: 3, color: 'orange' }
+    ];
+
+    let rocketAngle = 0;
+    let rocketRotation = 0;
+    let rocketVx = 0;
+    let rocketVy = 0;
+    let rocketX = 0;
+    let rocketY = 0;
+    
+    function drawSun() {
+      ctx.beginPath();
+      ctx.arc(0, 0, sun.radius, 0, Math.PI * 2);
+      ctx.fillStyle = sun.color;
+      ctx.fill();
+    }
+
+    function drawPlanet(planet) {
+      const x = Math.cos(planet.angle) * planet.orbitRadius;
+      const y = Math.sin(planet.angle) * planet.orbitRadius;
+
+      ctx.beginPath();
+      ctx.arc(x, y, planet.radius, 0, Math.PI * 2);
+      ctx.fillStyle = planet.color;
+      ctx.fill();
+
+      return { x, y };
+    }
+
+    function drawRocket() {
+        ctx.save();
+        ctx.translate(rocketX, rocketY);
+        ctx.rotate(rocketRotation);
+        ctx.beginPath();
+        ctx.moveTo(0, -6);
+        ctx.lineTo(-4, 4);
+        ctx.lineTo(4, 4);
+        ctx.closePath();
+        ctx.fillStyle = 'white';
+        ctx.fill();
+        ctx.restore();
+      }
+
+    function update() {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      ctx.setTransform(scale, 0, 0, scale, canvas.width / 2 + offsetX, canvas.height / 2 + offsetY);
+
+      drawSun();
+
+      for (let i = 0; i < planets.length; i++) {
+        const planet = planets[i];
+        const { x: planetX, y: planetY } = drawPlanet(planet);
+        planet.angle += planet.orbitSpeed;
+
+      }
+
+      drawRocket();
+
+      if (keys['ArrowLeft']) rocketRotation -= 0.05;
+      if (keys['ArrowRight']) rocketRotation += 0.05;
+      if (keys['ArrowUp']) {
+        rocketVx += Math.cos(rocketRotation) * 0.05;
+        rocketVy += Math.sin(rocketRotation) * 0.05;
+      }
+
+      requestAnimationFrame(update);
+    }
+
+    canvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      const zoom = Math.exp(-e.deltaY * 0.001);
+      scale *= zoom;
+      offsetX -= (e.offsetX - canvas.width / 2 - offsetX) * (zoom - 1);
+      offsetY -= (e.offsetY - canvas.height / 2 - offsetY) * (zoom - 1);
+    });
+
+    canvas.addEventListener('mousedown', e => {
+      isDragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+    });
+
+    canvas.addEventListener('mousemove', e => {
+      if (isDragging) {
+        offsetX += e.clientX - lastX;
+        offsetY += e.clientY - lastY;
+        lastX = e.clientX;
+        lastY = e.clientY;
+      }
+    });
+
+    canvas.addEventListener('mouseup', () => isDragging = false);
+    canvas.addEventListener('mouseleave', () => isDragging = false);
+
+    const keys = {};
+
+    document.addEventListener('keydown', e => {
+      keys[e.key] = true;
+    });
+
+    document.addEventListener('keyup', e => {
+      keys[e.key] = false;
+    });
+
+    update();
+  </script>
+</body>
+</html>
