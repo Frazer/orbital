@@ -76,13 +76,18 @@
       console.log(`Planet ${data.color}: orbital velocity = ${orbitalVelocity.toFixed(2)} at distance ${data.distance}`);
     }
 
-    let rocketAngle = 0;
-    let rocketRotation = Math.PI; // Start facing down (PI radians = 180 degrees)
-    let rocketVx = 0;
-    let rocketVy = 0;
-    let rocketX = 0;
-    let rocketY = 0;
-    const rocketMass = 20; // Lower mass to be more affected by gravity
+    // Rocket object containing all rocket properties
+    const rocket = {
+      angle: 0,
+      rotation: Math.PI/2, // Start facing down (PI/2 radians = 90 degrees in the new system)
+      vx: 0,
+      vy: 0,
+      x: 0,
+      y: 0,
+      mass: 20, // Mass of the rocket
+      thrustPower: 0.05, // Thrust power when engine is fired
+      initialized: false // Whether the rocket has been positioned
+    };
     
     function drawSun() {
       ctx.beginPath();
@@ -102,15 +107,15 @@
 
     function drawRocket() {
         ctx.save();
-        ctx.translate(rocketX, rocketY);
-        // Rotate so the rocket points in the direction of travel
-        ctx.rotate(rocketRotation);
+        ctx.translate(rocket.x, rocket.y);
+        // Rotate so the rocket points in the direction it's facing
+        ctx.rotate(rocket.rotation - Math.PI/2); // Adjust by -90° so that a rotation of 0 faces right
         
-        // Draw rocket with point facing upward (which is the direction of travel after rotation)
+        // Draw rocket with point facing right (which will be rotated to match the thrust direction)
         ctx.beginPath();
-        ctx.moveTo(0, -8); // Nose of rocket (forward direction)
-        ctx.lineTo(-4, 4);  // Bottom left corner
-        ctx.lineTo(4, 4);   // Bottom right corner
+        ctx.moveTo(8, 0);    // Nose of rocket (now pointing right)
+        ctx.lineTo(-4, -4);  // Top left corner
+        ctx.lineTo(-4, 4);   // Bottom left corner
         ctx.closePath();
         ctx.fillStyle = 'white';
         ctx.fill();
@@ -118,9 +123,9 @@
         // Draw a small flame when thrusting
         if (keys['ArrowUp']) {
           ctx.beginPath();
-          ctx.moveTo(-2, 4);  // Left side of rocket bottom
-          ctx.lineTo(0, 12);   // Flame tip
-          ctx.lineTo(2, 4);   // Right side of rocket bottom
+          ctx.moveTo(-4, -2);  // Top of rocket back
+          ctx.lineTo(-12, 0);  // Flame tip
+          ctx.lineTo(-4, 2);   // Bottom of rocket back
           ctx.closePath();
           ctx.fillStyle = 'orange';
           ctx.fill();
@@ -140,8 +145,8 @@
       // Special case: if one of the bodies is the rocket and the other is a planet
       let gravityMultiplier = 1;
       
-      // Check if body1 is the rocket (by checking for rocketMass) and body2 is not the sun
-      if (body1.mass === rocketMass && body2.mass < sun.mass) {
+      // Check if body1 is the rocket and body2 is not the sun
+      if (body1 === rocket && body2.mass < sun.mass) {
         gravityMultiplier = planetGravityFactor;
       }
       
@@ -203,8 +208,7 @@
       }
       
       // Calculate rocket physics - rocket experiences gravity but doesn't affect planets
-      if (rocketX !== 0 || rocketY !== 0) {
-        const rocket = { x: rocketX, y: rocketY, mass: rocketMass };
+      if (rocket.x !== 0 || rocket.y !== 0) {
         let totalFx = 0;
         let totalFy = 0;
         
@@ -222,16 +226,16 @@
         }
         
         // Apply acceleration (F = ma, so a = F/m)
-        const ax = totalFx / rocketMass;
-        const ay = totalFy / rocketMass;
+        const ax = totalFx / rocket.mass;
+        const ay = totalFy / rocket.mass;
         
         // Update velocity based on acceleration
-        rocketVx += ax * dt;
-        rocketVy += ay * dt;
+        rocket.vx += ax * dt;
+        rocket.vy += ay * dt;
         
         // Update rocket position
-        rocketX += rocketVx * dt;
-        rocketY += rocketVy * dt;
+        rocket.x += rocket.vx * dt;
+        rocket.y += rocket.vy * dt;
       }
     }
     
@@ -253,14 +257,14 @@
       }
 
       // Set rocket initial position near blue planet if not initialized
-      if (rocketX === 0 && rocketY === 0) {
+      if (!rocket.initialized) {
         // Find blue planet
         const bluePlanet = planets.find(p => p.color === 'blue');
         if (bluePlanet) {
           // Position rocket near blue planet
           const orbitDist = bluePlanet.radius + 20;
-          rocketX = bluePlanet.x + orbitDist;
-          rocketY = bluePlanet.y;
+          rocket.x = bluePlanet.x + orbitDist;
+          rocket.y = bluePlanet.y;
           
           // Calculate proper orbital velocity around the blue planet using Kepler's laws
           // This uses the enhanced planet gravity factor to match the simulation
@@ -272,23 +276,50 @@
           // For a rocket positioned to the right of the planet, velocity should be downward
           // Apply a speed multiplier to make it faster than a perfect circular orbit
           const speedMultiplier = 1.5; // Start 50% faster than orbital velocity
-          rocketVx = 0;
-          rocketVy = rocketOrbitSpeed * speedMultiplier; // Positive Y is downward in canvas coordinates
+          rocket.rotation = Math.PI; // Make sure rocket is facing down (90 degrees in our system)
+          rocket.vx = 0;
+          rocket.vy = rocketOrbitSpeed * speedMultiplier; // Positive Y is downward in canvas coordinates
+          
+          // Mark as initialized
+          rocket.initialized = true;
         }
       }
 
       drawRocket();
 
       // Handle rocket controls
-      if (keys['ArrowLeft']) rocketRotation -= 0.05;
-      if (keys['ArrowRight']) rocketRotation += 0.05;
+      if (keys['ArrowLeft']) rocket.rotation -= 0.05;
+      if (keys['ArrowRight']) rocket.rotation += 0.05;
       if (keys['ArrowUp']) {
         // Apply thrust in the direction the rocket is pointing
-        // In canvas, rotation of 0 is east (right), but we want 0 to be north (up)
-        // So we need to subtract PI/2 (90 degrees) from the rotation angle
-        const thrustAngle = rocketRotation - Math.PI/2;
-        rocketVx += Math.cos(thrustAngle) * 0.5;
-        rocketVy += Math.sin(thrustAngle) * 0.5;
+        // Now rotation angle directly matches thrust direction
+        // where 0 = right, PI/2 = down, PI = left, 3PI/2 = up
+        rocket.vx += Math.cos(rocket.rotation) * rocket.thrustPower;
+        rocket.vy += Math.sin(rocket.rotation) * rocket.thrustPower;
+      }
+      
+      // Show orbital information when close to a planet
+      let closestPlanet = null;
+      let closestDistance = Infinity;
+      
+      for (const planet of planets) {
+        const dx = planet.x - rocket.x;
+        const dy = planet.y - rocket.y;
+        const distance = Math.sqrt(dx*dx + dy*dy);
+        
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          closestPlanet = planet;
+        }
+      }
+      
+      // Debug overlay - show which planet is influencing the rocket most
+      if (closestPlanet && closestDistance < 100) {
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.fillStyle = closestPlanet.color;
+        ctx.fillRect(100, 100, 200, 200 );
+        ctx.restore();
       }
 
       requestAnimationFrame(update);
