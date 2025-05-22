@@ -113,9 +113,9 @@
         
         // Draw rocket with point facing right (which will be rotated to match the thrust direction)
         ctx.beginPath();
-        ctx.moveTo(8, 0);    // Nose of rocket (now pointing right)
-        ctx.lineTo(-4, -4);  // Top left corner
-        ctx.lineTo(-4, 4);   // Bottom left corner
+        ctx.moveTo(4, 0);    // Nose of rocket (now pointing right)
+        ctx.lineTo(-2, -2);  // Top left corner
+        ctx.lineTo(-2, 2);   // Bottom left corner
         ctx.closePath();
         ctx.fillStyle = 'white';
         ctx.fill();
@@ -123,9 +123,9 @@
         // Draw a small flame when thrusting
         if (keys['ArrowUp']) {
           ctx.beginPath();
-          ctx.moveTo(-4, -2);  // Top of rocket back
-          ctx.lineTo(-12, 0);  // Flame tip
-          ctx.lineTo(-4, 2);   // Bottom of rocket back
+          ctx.moveTo(-2, -1);  // Top of rocket back
+          ctx.lineTo(-6, 0);   // Flame tip (smaller)
+          ctx.lineTo(-2, 1);   // Bottom of rocket back
           ctx.closePath();
           ctx.fillStyle = 'orange';
           ctx.fill();
@@ -261,8 +261,8 @@
         // Find blue planet
         const bluePlanet = planets.find(p => p.color === 'blue');
         if (bluePlanet) {
-          // Position rocket near blue planet
-          const orbitDist = bluePlanet.radius + 20;
+          // Position rocket close to the blue planet
+          const orbitDist = bluePlanet.radius + 2; 
           rocket.x = bluePlanet.x + orbitDist;
           rocket.y = bluePlanet.y;
           
@@ -274,9 +274,8 @@
           
           // The rocket should orbit clockwise (to match downward orientation)
           // For a rocket positioned to the right of the planet, velocity should be downward
-          // Apply a speed multiplier to make it faster than a perfect circular orbit
-          const speedMultiplier = 1.5; // Start 50% faster than orbital velocity
-          rocket.rotation = Math.PI; // Make sure rocket is facing down (90 degrees in our system)
+          const speedMultiplier = 1.35; // Slightly faster than orbital velocity for a stable orbit
+          rocket.rotation = Math.PI/2; // Make sure rocket is facing down (90 degrees in our system)
           rocket.vx = 0;
           rocket.vy = rocketOrbitSpeed * speedMultiplier; // Positive Y is downward in canvas coordinates
           
@@ -292,10 +291,8 @@
       if (keys['ArrowRight']) rocket.rotation += 0.05;
       if (keys['ArrowUp']) {
         // Apply thrust in the direction the rocket is pointing
-        // Now rotation angle directly matches thrust direction
-        // where 0 = right, PI/2 = down, PI = left, 3PI/2 = up
-        rocket.vx += Math.cos(rocket.rotation) * rocket.thrustPower;
-        rocket.vy += Math.sin(rocket.rotation) * rocket.thrustPower;
+        rocket.vx += Math.sin(rocket.rotation) * rocket.thrustPower;
+        rocket.vy -= Math.cos(rocket.rotation) * rocket.thrustPower;
       }
       
       // Show orbital information when close to a planet
