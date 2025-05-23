@@ -23,22 +23,17 @@
     let isDragging = false;
     let lastX, lastY;
 
-    const sun = {
-      x: 0,
-      y: 0,
-      radius: 30,
-      color: 'yellow',
-      mass: 1000000 // Much larger mass for the sun to dominate gravitational effects
-    };
-
     // Physics constants
     const G = 0.1; // Gravitational constant (scaled for game physics)
     const TIME_SCALE = 0.01; // Slow down the simulation (1.0 = normal speed, lower = slower)
     const planetGravityFactor = 800; // 5000; // Extremely strong planet gravity influence on rocket
     
+    let closestPlanet = null;
+    let closestDistanceSQ = Infinity;
+      
     // Calculate mass based on radius (assuming density is constant)
     function calculateMass(radius) {
-      return Math.pow(radius, 3) * 0.5; // Scale factor for game physics
+      return Math.pow(radius, 3) * (1-Math.random()/10) // Scale factor for game physics
     }
     
     // Calculate orbital velocity for a circular orbit
@@ -46,34 +41,42 @@
       // For a circular orbit: v = sqrt(G * M / r)
       return Math.sqrt(G * centralMass / orbitRadius);
     }
+
+    const sun = {
+      x: 0,
+      y: 0,
+      radius: 30,
+      color: 'yellow',
+      mass: 1000000 // Much larger mass for the sun to dominate gravitational effects
+    };
     
     // Initialize planets with position, velocity and mass
     const planets = [];
     
-    // Planet data: radius, distance from sun, color
-    const planetData = [
-      { radius: 5, distance: 120, color: 'gray' },
-      { radius: 8, distance: 200, color: 'blue' },
-      { radius: 6, distance: 320, color: 'red' },
-      { radius: 10, distance: 440, color: 'orange' }
-    ];
-    
-    // Create planets with proper orbital velocities
-    for (const data of planetData) {
-      const mass = calculateMass(data.radius);
-      const orbitalVelocity = calculateOrbitalVelocity(sun.mass, data.distance);
+    function initializePlanets() {
+      // Planet data: radius, distance from sun, color
+      const planetData = [
+        { radius: 5, distance: 120, color: 'gray' },
+        { radius: 8, distance: 200, color: 'blue' },
+        { radius: 6, distance: 320, color: 'red' },
+        { radius: 10, distance: 440, color: 'orange' }
+      ];
       
-      planets.push({
-        radius: data.radius,
-        x: data.distance, // Start along positive x-axis
-        y: 0,
-        vx: 0,
-        vy: orbitalVelocity, // Velocity in y direction for circular orbit
-        color: data.color,
-        mass: mass
-      });
-      
-      console.log(`Planet ${data.color}: orbital velocity = ${orbitalVelocity.toFixed(2)} at distance ${data.distance}`);
+      // Create planets with proper orbital velocities
+      for (const data of planetData) {
+        const mass = calculateMass(data.radius);
+        const orbitalVelocity = calculateOrbitalVelocity(sun.mass, data.distance);
+        
+        planets.push({
+          radius: data.radius,
+          x: data.distance, // Start along positive x-axis
+          y: 0,
+          vx: 0,
+          vy: orbitalVelocity, // Velocity in y direction for circular orbit
+          color: data.color,
+          mass: mass
+        });
+      }
     }
 
     // Rocket object containing all rocket properties
@@ -89,6 +92,118 @@
       initialized: false // Whether the rocket has been positioned
     };
 
+    function initializeRocket() {
+      // Set rocket initial position near blue planet if not initialized
+      // Find blue planet
+      const bluePlanet = planets.find(p => p.color === 'blue');
+      if (bluePlanet) {
+        // Position rocket close to the blue planet
+        const orbitDist = bluePlanet.radius + 2; 
+        rocket.x = bluePlanet.x + orbitDist;
+        rocket.y = bluePlanet.y;
+        
+        // Calculate proper orbital velocity around the blue planet using Kepler's laws
+        // This uses the enhanced planet gravity factor to match the simulation
+        const enhancedPlanetMass = bluePlanet.mass * planetGravityFactor;
+        const rocketOrbitSpeed = calculateOrbitalVelocity(enhancedPlanetMass, orbitDist);
+        
+        // The rocket should orbit clockwise (to match downward orientation)
+        // For a rocket positioned to the right of the planet, velocity should be downward
+        const speedMultiplier = 1.35; // Slightly faster than orbital velocity for a stable orbit
+        rocket.rotation = Math.PI/2; // Make sure rocket is facing down (90 degrees in our system)
+        rocket.vx = 0;
+        rocket.vy = rocketOrbitSpeed * speedMultiplier; // Positive Y is downward in canvas coordinates
+        
+        // Mark as initialized
+        rocket.initialized = true;
+      }
+    }
+
+    const keys = {};
+    
+    function addListeners(){
+
+      canvas.addEventListener('wheel', e => {
+        e.preventDefault();
+        const zoom = Math.exp(-e.deltaY * 0.001);
+        scale *= zoom;
+        offsetX -= (e.offsetX - canvas.width / 2 - offsetX) * (zoom - 1);
+        offsetY -= (e.offsetY - canvas.height / 2 - offsetY) * (zoom - 1);
+      });
+
+      canvas.addEventListener('mousedown', e => {
+        isDragging = true;
+        lastX = e.clientX;
+        lastY = e.clientY;
+      });
+
+      canvas.addEventListener('mousemove', e => {
+        if (isDragging) {
+          offsetX += e.clientX - lastX;
+          offsetY += e.clientY - lastY;
+          lastX = e.clientX;
+          lastY = e.clientY;
+        }
+      });
+
+      canvas.addEventListener('mouseup', () => isDragging = false);
+      canvas.addEventListener('mouseleave', () => isDragging = false);
+
+      document.addEventListener('keydown', e => {
+        keys[e.key] = true;
+      });
+
+      document.addEventListener('keyup', e => {
+        keys[e.key] = false;
+      });
+    }
+    
+    function init(){
+      initializePlanets();
+      initializeRocket();
+      addListeners();
+    }
+
+    init();
+
+    function respondToUserInput() {
+      // Handle rocket controls
+      if (keys['ArrowLeft']) rocket.rotation -= 0.05;
+      if (keys['ArrowRight']) rocket.rotation += 0.05;
+      if (keys['ArrowUp']) {
+        // Apply thrust in the direction the rocket is pointing
+        rocket.vx += Math.sin(rocket.rotation) * rocket.thrustPower;
+        rocket.vy -= Math.cos(rocket.rotation) * rocket.thrustPower;
+      }
+    }
+
+    function DEBUG_show_orbital_info() {
+       // Show orbital information when close to a planet
+      closestPlanet = null;
+      closestDistanceSQ = Infinity;
+      
+      for (const planet of planets) {
+        const dx = planet.x - rocket.x;
+        const dy = planet.y - rocket.y;
+        const distanceSQ = dx*dx + dy*dy;
+        
+        if (distanceSQ < closestDistanceSQ) {
+          closestDistanceSQ = distanceSQ;
+          closestPlanet = planet;
+        }
+      }
+      
+      // Debug overlay - show which planet is influencing the rocket most
+      if (closestPlanet && closestDistanceSQ < 10000) {
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.fillStyle = closestPlanet.color;
+        const size = Math.min(200, 40000/closestDistanceSQ);
+        ctx.fillRect(100, 100, size, size );
+        ctx.restore();
+      }
+    } 
+    
     function drawPlanet(planet) {
       ctx.beginPath();
       ctx.arc(planet.x, planet.y, planet.radius, 0, Math.PI * 2);
@@ -247,107 +362,14 @@
         drawPlanet(planets[i]);
       }
 
-      // Set rocket initial position near blue planet if not initialized
-      if (!rocket.initialized) {
-        // Find blue planet
-        const bluePlanet = planets.find(p => p.color === 'blue');
-        if (bluePlanet) {
-          // Position rocket close to the blue planet
-          const orbitDist = bluePlanet.radius + 2; 
-          rocket.x = bluePlanet.x + orbitDist;
-          rocket.y = bluePlanet.y;
-          
-          // Calculate proper orbital velocity around the blue planet using Kepler's laws
-          // This uses the enhanced planet gravity factor to match the simulation
-          const enhancedPlanetMass = bluePlanet.mass * planetGravityFactor;
-          const rocketOrbitSpeed = calculateOrbitalVelocity(enhancedPlanetMass, orbitDist);
-          console.log(`Rocket orbital velocity: ${rocketOrbitSpeed} around planet with mass ${enhancedPlanetMass}`);
-          
-          // The rocket should orbit clockwise (to match downward orientation)
-          // For a rocket positioned to the right of the planet, velocity should be downward
-          const speedMultiplier = 1.35; // Slightly faster than orbital velocity for a stable orbit
-          rocket.rotation = Math.PI/2; // Make sure rocket is facing down (90 degrees in our system)
-          rocket.vx = 0;
-          rocket.vy = rocketOrbitSpeed * speedMultiplier; // Positive Y is downward in canvas coordinates
-          
-          // Mark as initialized
-          rocket.initialized = true;
-        }
-      }
-
       drawRocket();
 
-      // Handle rocket controls
-      if (keys['ArrowLeft']) rocket.rotation -= 0.05;
-      if (keys['ArrowRight']) rocket.rotation += 0.05;
-      if (keys['ArrowUp']) {
-        // Apply thrust in the direction the rocket is pointing
-        rocket.vx += Math.sin(rocket.rotation) * rocket.thrustPower;
-        rocket.vy -= Math.cos(rocket.rotation) * rocket.thrustPower;
-      }
-      
-      // Show orbital information when close to a planet
-      let closestPlanet = null;
-      let closestDistance = Infinity;
-      
-      for (const planet of planets) {
-        const dx = planet.x - rocket.x;
-        const dy = planet.y - rocket.y;
-        const distance = Math.sqrt(dx*dx + dy*dy);
-        
-        if (distance < closestDistance) {
-          closestDistance = distance;
-          closestPlanet = planet;
-        }
-      }
-      
-      // Debug overlay - show which planet is influencing the rocket most
-      if (closestPlanet && closestDistance < 100) {
-        ctx.save();
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.fillStyle = closestPlanet.color;
-        ctx.fillRect(100, 100, 200, 200 );
-        ctx.restore();
-      }
+      respondToUserInput();
+     
+      DEBUG_show_orbital_info();
 
       requestAnimationFrame(update);
     }
-
-    canvas.addEventListener('wheel', e => {
-      e.preventDefault();
-      const zoom = Math.exp(-e.deltaY * 0.001);
-      scale *= zoom;
-      offsetX -= (e.offsetX - canvas.width / 2 - offsetX) * (zoom - 1);
-      offsetY -= (e.offsetY - canvas.height / 2 - offsetY) * (zoom - 1);
-    });
-
-    canvas.addEventListener('mousedown', e => {
-      isDragging = true;
-      lastX = e.clientX;
-      lastY = e.clientY;
-    });
-
-    canvas.addEventListener('mousemove', e => {
-      if (isDragging) {
-        offsetX += e.clientX - lastX;
-        offsetY += e.clientY - lastY;
-        lastX = e.clientX;
-        lastY = e.clientY;
-      }
-    });
-
-    canvas.addEventListener('mouseup', () => isDragging = false);
-    canvas.addEventListener('mouseleave', () => isDragging = false);
-
-    const keys = {};
-
-    document.addEventListener('keydown', e => {
-      keys[e.key] = true;
-    });
-
-    document.addEventListener('keyup', e => {
-      keys[e.key] = false;
-    });
 
     update();
   </script>
