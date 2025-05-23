@@ -88,21 +88,12 @@
       thrustPower: 0.05, // Thrust power when engine is fired
       initialized: false // Whether the rocket has been positioned
     };
-    
-    function drawSun() {
-      ctx.beginPath();
-      ctx.arc(0, 0, sun.radius, 0, Math.PI * 2);
-      ctx.fillStyle = sun.color;
-      ctx.fill();
-    }
 
     function drawPlanet(planet) {
       ctx.beginPath();
       ctx.arc(planet.x, planet.y, planet.radius, 0, Math.PI * 2);
       ctx.fillStyle = planet.color;
       ctx.fill();
-
-      return { x: planet.x, y: planet.y };
     }
 
     function drawRocket() {
@@ -250,7 +241,7 @@
       updatePhysics(dt);
       
       // Draw everything
-      drawSun();
+      drawPlanet(sun);
 
       for (let i = 0; i < planets.length; i++) {
         drawPlanet(planets[i]);
