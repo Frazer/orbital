@@ -23,6 +23,10 @@
     let offsetY = 0;
     let isDragging = false;
     let lastX, lastY;
+    let followEnabled = true; // Camera following is enabled by default
+    let targetOffsetX = 0;
+    let targetOffsetY = 0;
+    const cameraSmoothness = 0.01; // Adjust for faster/slower smooth camera (0.03 = 3% movement per frame)
 
     // Physics constants
     const G = 0.1; // Gravitational constant (scaled for game physics)
@@ -136,6 +140,9 @@
         isDragging = true;
         lastX = e.clientX;
         lastY = e.clientY;
+        
+        // Stop following when user drags
+        followEnabled = false;
       });
 
       canvas.addEventListener('mousemove', e => {
@@ -156,6 +163,11 @@
 
       document.addEventListener('keyup', e => {
         keys[e.key] = false;
+        
+        // Toggle camera follow mode with 'f' key
+        if (e.key === 'f') {
+          followEnabled = !followEnabled;
+        }
       });
     }
     
@@ -163,6 +175,15 @@
       initializePlanets();
       initializeRocket();
       addListeners();
+  
+      // Initialize camera focus on blue planet (as a starting point)
+      const bluePlanet = planets.find(p => p.color === 'blue');
+      if (bluePlanet) {
+        offsetX = -bluePlanet.x * scale;
+        offsetY = -bluePlanet.y * scale;
+        targetOffsetX = offsetX;
+        targetOffsetY = offsetY;
+      }
     }
 
     init();
@@ -349,6 +370,24 @@
     function update() {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // If camera following is enabled, update camera position
+      if (followEnabled) {
+        // Follow the closest planet if it's close enough, otherwise follow the rocket
+        if (closestPlanet && closestDistanceSQ <= 4000) {
+          // Calculate target camera position to center on closest planet
+          targetOffsetX = -closestPlanet.x * scale;
+          targetOffsetY = -closestPlanet.y * scale;
+        } else {
+          // Follow the rocket when no planet is close enough
+          targetOffsetX = -rocket.x * scale;
+          targetOffsetY = -rocket.y * scale;
+        }
+        
+        // Smoothly move towards target position (interpolation)
+        offsetX += (targetOffsetX - offsetX) * cameraSmoothness;
+        offsetY += (targetOffsetY - offsetY) * cameraSmoothness;
+      }
 
       ctx.setTransform(scale, 0, 0, scale, canvas.width / 2 + offsetX, canvas.height / 2 + offsetY);
 
