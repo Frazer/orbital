@@ -134,7 +134,7 @@
         scale *= zoom;
         offsetX -= (e.offsetX - canvas.width / 2 - offsetX) * (zoom - 1);
         offsetY -= (e.offsetY - canvas.height / 2 - offsetY) * (zoom - 1);
-      });
+      }, { passive: false });
 
       canvas.addEventListener('mousedown', e => {
         isDragging = true;
