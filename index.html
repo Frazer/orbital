@@ -170,9 +170,9 @@
         }
       });
     }
-    
+
     function setInitialCameraFocus() {
-  
+    
       // Initialize camera focus on blue planet (as a starting point)
       const bluePlanet = planets.find(p => p.color === 'blue');
       if (bluePlanet) {
@@ -291,6 +291,20 @@
       
       return { fx, fy };
     }
+
+    function applyAcceleration(forceX, forceY, body,  dt){
+      // Apply acceleration (F = ma, so a = F/m)
+      const ax = forceX / body.mass;
+      const ay = forceY / body.mass;
+      
+      // Update velocity based on acceleration
+      body.vx += ax * dt;
+      body.vy += ay * dt;
+      
+      // Update rocket position
+      body.x += body.vx * dt;
+      body.y += body.vy * dt;
+    }
     
     // Apply gravitational forces and update positions
     function updatePhysics(dt) {
@@ -324,51 +338,28 @@
       
       // Apply forces to update planet velocities and positions
       for (let i = 0; i < planets.length; i++) {
-        const planet = planets[i];
-        
-        // Apply acceleration (F = ma, so a = F/m)
-        const ax = forces[i].fx / planet.mass;
-        const ay = forces[i].fy / planet.mass;
-        
-        // Update velocity based on acceleration
-        planet.vx += ax * dt;
-        planet.vy += ay * dt;
-        
-        // Update position based on velocity
-        planet.x += planet.vx * dt;
-        planet.y += planet.vy * dt;
+        applyAcceleration(forces[i].fx, forces[i].fy, planets[i], dt);
       }
       
       // Calculate rocket physics - rocket experiences gravity but doesn't affect planets
-      if (rocket.x !== 0 || rocket.y !== 0) {
-        let totalFx = 0;
-        let totalFy = 0;
-        
-        // Apply sun's gravity to rocket
-        const { fx: sunFx, fy: sunFy } = calculateGravity(rocket, sun);
-        totalFx += sunFx;
-        totalFy += sunFy;
-        
-        // Apply planets' gravity to rocket
-        for (let i = 0; i < planets.length; i++) {
-          const planet = planets[i];
-          const { fx, fy } = calculateGravity(rocket, planet);
-          totalFx += fx;
-          totalFy += fy;
-        }
-        
-        // Apply acceleration (F = ma, so a = F/m)
-        const ax = totalFx / rocket.mass;
-        const ay = totalFy / rocket.mass;
-        
-        // Update velocity based on acceleration
-        rocket.vx += ax * dt;
-        rocket.vy += ay * dt;
-        
-        // Update rocket position
-        rocket.x += rocket.vx * dt;
-        rocket.y += rocket.vy * dt;
+      let rocketFx = 0;
+      let rocketFy = 0;
+      
+      // Apply sun's gravity to rocket
+      const { fx: sunFx, fy: sunFy } = calculateGravity(rocket, sun);
+      rocketFx += sunFx;
+      rocketFy += sunFy;
+      
+      // Apply planets' gravity to rocket
+      for (let i = 0; i < planets.length; i++) {
+        const planet = planets[i];
+        const { fx, fy } = calculateGravity(rocket, planet);
+        rocketFx += fx;
+        rocketFy += fy;
       }
+      
+      applyAcceleration(rocketFx, rocketFy, rocket, dt);
+      
     }
     
     function update() {
