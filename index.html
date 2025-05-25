@@ -171,10 +171,7 @@
       });
     }
     
-    function init(){
-      initializePlanets();
-      initializeRocket();
-      addListeners();
+    function setInitialCameraFocus() {
   
       // Initialize camera focus on blue planet (as a starting point)
       const bluePlanet = planets.find(p => p.color === 'blue');
@@ -184,6 +181,13 @@
         targetOffsetX = offsetX;
         targetOffsetY = offsetY;
       }
+    }
+    
+    function init(){
+      initializePlanets();
+      initializeRocket();
+      addListeners();
+      setInitialCameraFocus();
     }
 
     init();
