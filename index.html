@@ -373,20 +373,40 @@
 
       // If camera following is enabled, update camera position
       if (followEnabled) {
-        // Follow the closest planet if it's close enough, otherwise follow the rocket
+        // Determine which object to follow
         if (closestPlanet && closestDistanceSQ <= 4000) {
-          // Calculate target camera position to center on closest planet
+          // Follow the closest planet when close enough
           targetOffsetX = -closestPlanet.x * scale;
           targetOffsetY = -closestPlanet.y * scale;
+          
+          // Calculate dynamic smoothness based on proximity to planet
+          // As we get closer, smoothness increases (more precise movement)
+          const baseThreshold = 4000; // Start adjusting at this distance
+          const veryCloseThreshold = 500; // Perfect centering below this
+          
+          if (closestDistanceSQ <= veryCloseThreshold) {
+            // When extremely close, snap precisely to planet position
+            offsetX = targetOffsetX;
+            offsetY = targetOffsetY;
+          } else {
+            // Adaptive smoothness - increases as distance decreases
+            // Map distance from [veryCloseThreshold, baseThreshold] to [1.0, cameraSmoothness]
+            const distanceRatio = Math.min(1, (closestDistanceSQ - veryCloseThreshold) / (baseThreshold - veryCloseThreshold));
+            const adaptiveSmoothness = cameraSmoothness + (1 - cameraSmoothness) * (1 - distanceRatio);
+            
+            // Apply the adaptive smoothing
+            offsetX += (targetOffsetX - offsetX) * adaptiveSmoothness;
+            offsetY += (targetOffsetY - offsetY) * adaptiveSmoothness;
+          }
         } else {
           // Follow the rocket when no planet is close enough
           targetOffsetX = -rocket.x * scale;
           targetOffsetY = -rocket.y * scale;
+          
+          // Use normal smoothness for rocket following
+          offsetX += (targetOffsetX - offsetX) * cameraSmoothness;
+          offsetY += (targetOffsetY - offsetY) * cameraSmoothness;
         }
-        
-        // Smoothly move towards target position (interpolation)
-        offsetX += (targetOffsetX - offsetX) * cameraSmoothness;
-        offsetY += (targetOffsetY - offsetY) * cameraSmoothness;
       }
 
       ctx.setTransform(scale, 0, 0, scale, canvas.width / 2 + offsetX, canvas.height / 2 + offsetY);
