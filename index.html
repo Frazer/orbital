@@ -94,12 +94,10 @@
       y: 0,
       mass: 20, // Mass of the rocket
       thrustPower: 0.05, // Thrust power when engine is fired
-      initialized: false // Whether the rocket has been positioned
     };
 
     function initializeRocket() {
-      // Set rocket initial position near blue planet if not initialized
-      // Find blue planet
+      // Set rocket initial position near blue planet
       const bluePlanet = planets.find(p => p.color === 'blue');
       if (bluePlanet) {
         // Position rocket close to the blue planet
@@ -114,13 +112,9 @@
         
         // The rocket should orbit clockwise (to match downward orientation)
         // For a rocket positioned to the right of the planet, velocity should be downward
-        const speedMultiplier = 1.35; // Slightly faster than orbital velocity for a stable orbit
         rocket.rotation = Math.PI/2; // Make sure rocket is facing down (90 degrees in our system)
         rocket.vx = 0;
-        rocket.vy = rocketOrbitSpeed * speedMultiplier; // Positive Y is downward in canvas coordinates
-        
-        // Mark as initialized
-        rocket.initialized = true;
+        rocket.vy = rocketOrbitSpeed + bluePlanet.vy ; 
       }
     }
 
