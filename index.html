@@ -31,7 +31,7 @@
     // Physics constants
     const G = 0.1; // Gravitational constant (scaled for game physics)
     const TIME_SCALE = 0.01; // Slow down the simulation (1.0 = normal speed, lower = slower)
-    const planetGravityFactor = 800; // 5000; // Extremely strong planet gravity influence on rocket
+    const planetGravityFactor = 800; // Extremely strong planet gravity influence on rocket
     
     let closestPlanet = null;
     let closestDistanceSQ = Infinity;
@@ -266,8 +266,7 @@
       const dx = body2.x - body1.x;
       const dy = body2.y - body1.y;
       const distSq = dx * dx + dy * dy;
-      const dist = Math.sqrt(distSq);
-      
+
       // Special case: if one of the bodies is the rocket and the other is a planet
       let gravityMultiplier = 1;
       
@@ -278,7 +277,13 @@
       
       // Force magnitude (Newton's law of universal gravitation)
       const force = G * body1.mass * body2.mass * gravityMultiplier / distSq;
-      
+
+      if(force < 5){
+        return { fx: 0, fy: 0 };  
+      }
+
+      const dist = Math.sqrt(distSq);
+
       // Force components
       const fx = force * dx / dist;
       const fy = force * dy / dist;
