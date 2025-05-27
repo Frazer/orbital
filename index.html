@@ -362,39 +362,45 @@
     }
     
     function updateCameraPosition() {
-        // Determine which object to follow
-        if (closestPlanet && closestDistanceSQ <= 4000) {
+      // Constants used for both planet and rocket following
+      const baseThreshold = 4000; // Start adjusting at this distance
+      const veryCloseThreshold = 500; // Perfect centering below this
+      
+      // Determine which object to follow and set target position
+      let targetObject;
+      let distanceSQ;
+      
+      if (closestPlanet && closestDistanceSQ <= baseThreshold) {
         // Follow the closest planet when close enough
-        targetOffsetX = -closestPlanet.x * scale;
-        targetOffsetY = -closestPlanet.y * scale;
-        
-        // Calculate dynamic smoothness based on proximity to planet
-        // As we get closer, smoothness increases (more precise movement)
-        const baseThreshold = 4000; // Start adjusting at this distance
-        const veryCloseThreshold = 500; // Perfect centering below this
-        
-        if (closestDistanceSQ <= veryCloseThreshold) {
-          // When extremely close, snap precisely to planet position
-          offsetX = targetOffsetX;
-          offsetY = targetOffsetY;
-        } else {
-          // Adaptive smoothness - increases as distance decreases
-          // Map distance from [veryCloseThreshold, baseThreshold] to [1.0, cameraSmoothness]
-          const distanceRatio = Math.min(1, (closestDistanceSQ - veryCloseThreshold) / (baseThreshold - veryCloseThreshold));
-          const adaptiveSmoothness = cameraSmoothness + (1 - cameraSmoothness) * (1 - distanceRatio);
-          
-          // Apply the adaptive smoothing
-          offsetX += (targetOffsetX - offsetX) * adaptiveSmoothness;
-          offsetY += (targetOffsetY - offsetY) * adaptiveSmoothness;
-        }
+        targetObject = closestPlanet;
+        distanceSQ = closestDistanceSQ;
       } else {
         // Follow the rocket when no planet is close enough
-        targetOffsetX = -rocket.x * scale;
-        targetOffsetY = -rocket.y * scale;
+        targetObject = rocket;
+        // For the rocket, we'll measure the distance between current camera focus and where it should be
+        const cameraDeltaX = (-rocket.x * scale) - offsetX;
+        const cameraDeltaY = (-rocket.y * scale) - offsetY;
+        distanceSQ = cameraDeltaX * cameraDeltaX + cameraDeltaY * cameraDeltaY;
+      }
+      
+      // Set target offset based on the object we're following
+      targetOffsetX = -targetObject.x * scale;
+      targetOffsetY = -targetObject.y * scale;
+      
+      // Apply the appropriate camera movement based on distance
+      if (distanceSQ <= veryCloseThreshold) {
+        // When extremely close, snap precisely to target position
+        offsetX = targetOffsetX;
+        offsetY = targetOffsetY;
+      } else {
+        // Adaptive smoothness - increases as distance decreases
+        // Map distance from [veryCloseThreshold, baseThreshold] to [1.0, cameraSmoothness]
+        const distanceRatio = Math.min(1, (distanceSQ - veryCloseThreshold) / (baseThreshold - veryCloseThreshold));
+        const adaptiveSmoothness = cameraSmoothness + (1 - cameraSmoothness) * (1 - distanceRatio);
         
-        // Use normal smoothness for rocket following
-        offsetX += (targetOffsetX - offsetX) * cameraSmoothness;
-        offsetY += (targetOffsetY - offsetY) * cameraSmoothness;
+        // Apply the adaptive smoothing
+        offsetX += (targetOffsetX - offsetX) * adaptiveSmoothness;
+        offsetY += (targetOffsetY - offsetY) * adaptiveSmoothness;
       }
     }
     
