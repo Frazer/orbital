@@ -18,6 +18,18 @@
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
 
+    const cameraSmoothness = 0.01; // Adjust for faster/slower smooth camera (0.03 = 3% movement per frame)
+
+    // Physics constants
+    const G = 0.1; // Gravitational constant (scaled for game physics)
+    const TIME_SCALE = 0.01; // Slow down the simulation (1.0 = normal speed, lower = slower)
+    const planetGravityFactor = 800; // Extremely strong planet gravity influence on rocket
+
+    // Visual constants
+    const COLLECTIBLE_RADIUS = 1;
+    const BOOSTER_COLOR = 'green';
+    const MATERIAL_COLOR = 'gold';
+
     let scale = 1;
     let offsetX = 0;
     let offsetY = 0;
@@ -26,16 +38,21 @@
     let followEnabled = true; // Camera following is enabled by default
     let targetOffsetX = 0;
     let targetOffsetY = 0;
-    const cameraSmoothness = 0.01; // Adjust for faster/slower smooth camera (0.03 = 3% movement per frame)
 
-    // Physics constants
-    const G = 0.1; // Gravitational constant (scaled for game physics)
-    const TIME_SCALE = 0.01; // Slow down the simulation (1.0 = normal speed, lower = slower)
-    const planetGravityFactor = 800; // Extremely strong planet gravity influence on rocket
-    
     let closestPlanet = null;
     let closestDistanceSQ = Infinity;
-      
+
+    // Initialize planets with position, velocity and mass
+    const planets = [];
+    
+    // ------------------ GAME COLLECTIBLES ------------------
+    // Arrays for booster items and material items orbiting planets
+    const boosters = [];    // Each item: { planet, angle, distance, x, y }
+    const materials = [];   // Each item: { planet, angle, distance, x, y }
+    
+    // Player scoring & booster count
+    let score = 0;
+     
     // Calculate mass based on radius (assuming density is constant)
     function calculateMass(radius) {
       return Math.pow(radius, 3) * (1-Math.random()/10) // Scale factor for game physics
@@ -55,8 +72,6 @@
       mass: 1000000 // Much larger mass for the sun to dominate gravitational effects
     };
     
-    // Initialize planets with position, velocity and mass
-    const planets = [];
     
     function initializePlanets() {
       // Planet data: radius, distance from sun, color
@@ -84,6 +99,39 @@
       }
     }
 
+    // Spawn a handful of boosters & materials in orbit around each planet
+    function initializeCollectibles() {
+      const MIN_DISTANCE_FROM_PLANET = 10; // offset from surface
+
+      for (const planet of planets) {
+        const orbitalDistance = planet.radius + MIN_DISTANCE_FROM_PLANET;
+        const BOOSTERS_PER_PLANET = Math.floor(planet.radius*1.4);
+        const MATERIALS_PER_PLANET = Math.floor(planet.radius*2);
+      
+        // Boosters
+        for (let i = 0; i < BOOSTERS_PER_PLANET; i++) {
+          boosters.push({
+            planet,
+            angle: Math.random() * Math.PI * 2,
+            distance: orbitalDistance + Math.random() * 5,
+            x: 0,
+            y: 0
+          });
+        }
+
+        // Materials
+        for (let i = 0; i < MATERIALS_PER_PLANET; i++) {
+          materials.push({
+            planet,
+            angle: Math.random() * Math.PI * 2,
+            distance: orbitalDistance + Math.random() * 3,
+            x: 0,
+            y: 0
+          });
+        }
+      }
+    }
+
     // Rocket object containing all rocket properties
     const rocket = {
       angle: 0,
@@ -94,6 +142,7 @@
       y: 0,
       mass: 20, // Mass of the rocket
       thrustPower: 0.05, // Thrust power when engine is fired
+      boosters: 0, // Number of collected boosters
     };
 
     function initializeRocket() {
@@ -180,11 +229,22 @@
     function init(){
       initializePlanets();
       initializeRocket();
+      initializeCollectibles();
       addListeners();
       setInitialCameraFocus();
     }
 
     init();
+
+    // Consume a booster to give the rocket a quick speed burst
+    function useBooster() {
+      if (rocket.boosters > 0) {
+        rocket.boosters--;
+        const BOOST_POWER = 1; // Stronger than normal thrust
+        rocket.vx += Math.sin(rocket.rotation) * BOOST_POWER;
+        rocket.vy -= Math.cos(rocket.rotation) * BOOST_POWER;
+      }
+    }
 
     function respondToUserInput() {
       // Handle rocket controls
@@ -195,24 +255,12 @@
         rocket.vx += Math.sin(rocket.rotation) * rocket.thrustPower;
         rocket.vy -= Math.cos(rocket.rotation) * rocket.thrustPower;
       }
+      if (keys[' ']) {
+        useBooster();
+      }
     }
 
     function DEBUG_show_orbital_info() {
-       // Show orbital information when close to a planet
-      closestPlanet = null;
-      closestDistanceSQ = Infinity;
-      
-      for (const planet of planets) {
-        const dx = planet.x - rocket.x;
-        const dy = planet.y - rocket.y;
-        const distanceSQ = dx*dx + dy*dy;
-        
-        if (distanceSQ < closestDistanceSQ) {
-          closestDistanceSQ = distanceSQ;
-          closestPlanet = planet;
-        }
-      }
-      
       // Debug overlay - show which planet is influencing the rocket most
       if (closestPlanet && closestDistanceSQ < 10000) {
         ctx.save();
@@ -245,6 +293,17 @@
         ctx.closePath();
         ctx.fillStyle = 'white';
         ctx.fill();
+
+        // Draw a bigger flame while boosting
+        if (keys[' '] && rocket.boosters > 0) {
+          ctx.beginPath();
+          ctx.moveTo(-2, -1.8);  // Top of rocket back
+          ctx.lineTo(-8, 0);   // Flame tip (smaller)
+          ctx.lineTo(-2, 1.8);   // Bottom of rocket back
+          ctx.closePath();
+          ctx.fillStyle = 'blue';
+          ctx.fill();
+        }
         
         // Draw a small flame when thrusting
         if (keys['ArrowUp']) {
@@ -260,12 +319,48 @@
         ctx.restore();
       }
 
+    // Draw collectibles within world space
+    function drawCollectibles() {
+      ctx.save();
+      for (const b of boosters) {
+        ctx.fillStyle = BOOSTER_COLOR;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, COLLECTIBLE_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      for (const m of materials) {
+        ctx.fillStyle = MATERIAL_COLOR;
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, COLLECTIBLE_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // HUD drawing (screen space)
+    function drawHUD() {
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0); // Screen space
+      ctx.fillStyle = 'white';
+      ctx.font = '16px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(`Ore: ${score}`, canvas.width - 10, 20);
+      ctx.fillText(`Fuel: ${Math.floor(rocket.boosters)}`, canvas.width - 10, 40);
+      ctx.restore();
+    }
+
     // Calculate gravitational force between two bodies
     // with special handling for rocket-planet interactions
     function calculateGravity(body1, body2) {
       const dx = body2.x - body1.x;
       const dy = body2.y - body1.y;
       const distSq = dx * dx + dy * dy;
+
+      if(body2.radius  && distSq < body2.radius*body2.radius){
+        rocket.vx *= 0.9999;
+        rocket.vy *= 0.9999;
+        return { fx: 0, fy: 0, distSq };
+      }
 
       // Special case: if one of the bodies is the rocket and the other is a planet
       let gravityMultiplier = 1;
@@ -279,7 +374,7 @@
       const force = G * body1.mass * body2.mass * gravityMultiplier / distSq;
 
       if(force < 5){
-        return { fx: 0, fy: 0 };  
+        return { fx: 0, fy: 0, distSq };  
       }
 
       const dist = Math.sqrt(distSq);
@@ -288,7 +383,7 @@
       const fx = force * dx / dist;
       const fy = force * dy / dist;
       
-      return { fx, fy };
+      return { fx, fy, distSq };
     }
 
     function applyAcceleration(forceX, forceY, body,  dt){
@@ -300,63 +395,42 @@
       body.vx += ax * dt;
       body.vy += ay * dt;
       
-      // Update rocket position
+      // Update position
       body.x += body.vx * dt;
       body.y += body.vy * dt;
     }
     
     // Apply gravitational forces and update positions
     function updatePhysics(dt) {
-      // Store forces for each planet to avoid immediate position updates affecting other calculations
-      const forces = [];
-      for (let i = 0; i < planets.length; i++) {
-        forces.push({ fx: 0, fy: 0 });
-      }
-      
-      // Calculate all gravitational forces
-      // 1. Sun's gravity on all planets
-      for (let i = 0; i < planets.length; i++) {
-        const planet = planets[i];
-        const { fx, fy } = calculateGravity(planet, sun);
-        forces[i].fx += fx;
-        forces[i].fy += fy;
-      }
-      
-      // 2. Inter-planetary gravity (each planet affects all other planets)
-      for (let i = 0; i < planets.length; i++) {
-        for (let j = i + 1; j < planets.length; j++) {  // Only calculate each pair once
-          const { fx, fy } = calculateGravity(planets[i], planets[j]);
-          
-          // Apply Newton's third law: equal and opposite forces
-          forces[i].fx += fx;
-          forces[i].fy += fy;
-          forces[j].fx -= fx;  // Opposite direction for the other planet
-          forces[j].fy -= fy;
-        }
-      }
-      
-      // Apply forces to update planet velocities and positions
-      for (let i = 0; i < planets.length; i++) {
-        applyAcceleration(forces[i].fx, forces[i].fy, planets[i], dt);
-      }
+
+      closestPlanet = null;
+      closestDistanceSQ = Infinity;
       
       // Calculate rocket physics - rocket experiences gravity but doesn't affect planets
       let rocketFx = 0;
       let rocketFy = 0;
       
-      // Apply sun's gravity to rocket
       const { fx: sunFx, fy: sunFy } = calculateGravity(rocket, sun);
       rocketFx += sunFx;
       rocketFy += sunFy;
-      
-      // Apply planets' gravity to rocket
+
       for (let i = 0; i < planets.length; i++) {
         const planet = planets[i];
-        const { fx, fy } = calculateGravity(rocket, planet);
-        rocketFx += fx;
-        rocketFy += fy;
-      }
+
+        const { fx, fy } = calculateGravity(planet, sun);
+
+        applyAcceleration(fx, fy, planet, dt);
       
+        const { fx: rfx, fy: rfy, distSq } = calculateGravity(rocket, planet);
+        rocketFx += rfx;
+        rocketFy += rfy;
+
+        if (distSq < closestDistanceSQ) {
+          closestDistanceSQ = distSq;
+          closestPlanet = planet;
+        }
+      }
+            
       applyAcceleration(rocketFx, rocketFy, rocket, dt);
       
     }
@@ -404,6 +478,39 @@
       }
     }
     
+    // Update collectible positions and handle collisions
+    function updateCollectibles(dt) {
+      
+
+      const updateGroup = (group, onCollect) => {
+        for (let i = group.length - 1; i >= 0; i--) {
+          const item = group[i];
+          const angularSpeed = item.distance * 0.05 * dt;  // radians per update (scaled)
+          item.angle += angularSpeed;
+          item.x = item.planet.x + Math.cos(item.angle) * item.distance;
+          item.y = item.planet.y + Math.sin(item.angle) * item.distance;
+
+          // Collision with rocket (simple distance check)
+          const dx = item.x - rocket.x;
+          const dy = item.y - rocket.y;
+          if (dx * dx + dy * dy < 16) {
+            onCollect(); // trigger reward
+            group.splice(i, 1); // remove item
+          }
+        }
+      };
+
+      // Booster collection
+      updateGroup(boosters, () => {
+        rocket.boosters+=100;
+      });
+
+      // Material collection
+      updateGroup(materials, () => {
+        score += 10;
+      });
+    }
+
     
     function update() {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -419,6 +526,8 @@
       const dt = TIME_SCALE; // Apply time scale to slow down simulation
       updatePhysics(dt);
       
+      updateCollectibles(dt);
+      
       // Draw everything
       drawPlanet(sun);
 
@@ -426,11 +535,15 @@
         drawPlanet(planets[i]);
       }
 
+      drawCollectibles();
+
       drawRocket();
 
       respondToUserInput();
      
-      DEBUG_show_orbital_info();
+      drawHUD();
+
+      // DEBUG_show_orbital_info();
 
       requestAnimationFrame(update);
     }
