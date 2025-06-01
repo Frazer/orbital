@@ -357,6 +357,13 @@
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('ORBITAL', centerX, centerY - 100);
+
+      // Previous score (if available)
+      if (score > 0) {
+        ctx.fillStyle = 'white';
+        ctx.font = '16px Arial';
+        ctx.fillText(`LAST SCORE: ${score}`, centerX, canvas.height - 200);
+      }
       
       // High score
       ctx.fillStyle = 'white';
@@ -396,17 +403,12 @@
       // Score
       ctx.fillStyle = 'white';
       ctx.font = '36px Arial';
-      ctx.fillText(`SCORE: ${score}`, centerX, centerY);
+      ctx.fillText(`SCORE: ${score}`, centerX, canvas.height - 200);
       
       // High score
       ctx.fillStyle = '#4fc3f7';
       ctx.font = '24px Arial';
-      ctx.fillText(`HIGH SCORE: ${highScore}`, centerX, centerY + 50);
-      
-      // Show start button with different text
-      const startButton = document.getElementById('startButton');
-      startButton.textContent = 'PLAY AGAIN';
-      startButton.style.display = 'block';
+      ctx.fillText(`HIGH SCORE: ${highScore}`, centerX, canvas.height - 150);
       
       ctx.restore();
     }
@@ -441,6 +443,9 @@
     function endGame() {
       updateHighScore();
       currentGameState = GAME_STATE.GAME_OVER;
+      setTimeout(() => {
+        currentGameState = GAME_STATE.WELCOME;
+      }, 3000);
     }
 
     // Consume a booster to give the rocket a quick speed burst
