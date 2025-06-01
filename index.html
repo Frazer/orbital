@@ -3,14 +3,48 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Orbiting Planets</title>
+  <title>Orbital</title>
   <style>
     body { margin: 0; background: black; overflow: hidden; }
     canvas { display: block; cursor: grab; }
+    @font-face {
+      font-family: 'SpaceFont';
+      src: url('https://fonts.gstatic.com/s/quantico/v15/rax5HiSdp9cPL3km3mujm9_1kw.woff2') format('woff2');
+      font-display: swap;
+    }
+    .start-button {
+      position: absolute;
+      top: 65%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      padding: 15px 30px;
+      background: rgba(79, 195, 247, 0.2);
+      color: #4fc3f7;
+      border: 2px solid #4fc3f7;
+      border-radius: 30px;
+      font-size: 24px;
+      font-family: 'SpaceFont', Arial, sans-serif;
+      cursor: pointer;
+      transition: all 0.3s;
+      animation: pulse 1.5s infinite;
+      outline: none;
+      z-index: 100;
+      display: none; /* Initially hidden, shown via JS */
+    }
+    .start-button:hover {
+      background: rgba(79, 195, 247, 0.5);
+      transform: translate(-50%, -50%) scale(1.05);
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0.5); }
+      70% { box-shadow: 0 0 0 10px rgba(79, 195, 247, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0); }
+    }
   </style>
 </head>
 <body>
   <canvas id="solarSystem"></canvas>
+  <button id="startButton" class="start-button">START GAME</button>
   <script>
     const canvas = document.getElementById('solarSystem');
     const ctx = canvas.getContext('2d');
@@ -30,6 +64,13 @@
     const BOOSTER_COLOR = 'green';
     const MATERIAL_COLOR = 'gold';
 
+    // Game state management
+    const GAME_STATE = {
+      WELCOME: 'welcome',
+      PLAYING: 'playing',
+      GAME_OVER: 'gameover'
+    };
+    
     let scale = 1;
     let offsetX = 0;
     let offsetY = 0;
@@ -52,7 +93,10 @@
     
     // Player scoring & booster count
     let score = 0;
-     
+    let highScore = localStorage.getItem('orbitalHighScore') || 0;
+    
+    let currentGameState = GAME_STATE.WELCOME;
+    
     // Calculate mass based on radius (assuming density is constant)
     function calculateMass(radius) {
       return Math.pow(radius, 3) * (1-Math.random()/10) // Scale factor for game physics
@@ -81,6 +125,8 @@
         { radius: 6, distance: 320, color: 'red' },
         { radius: 10, distance: 440, color: 'orange' }
       ];
+
+      planets.length = 0;
       
       // Create planets with proper orbital velocities
       for (const data of planetData) {
@@ -171,6 +217,13 @@
     
     function addListeners(){
       // add zoom, pan, and key listeners
+
+      // Resize canvas when window is resized
+      window.addEventListener('resize', () => {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+      });
+
       canvas.addEventListener('wheel', e => {
         e.preventDefault();
         const zoom = Math.exp(-e.deltaY * 0.001);
@@ -202,6 +255,18 @@
 
       document.addEventListener('keydown', e => {
         keys[e.key] = true;
+        
+        // Game state control
+        if (e.key === ' ' || e.code === 'Space') {
+          if (currentGameState === GAME_STATE.WELCOME ||currentGameState === GAME_STATE.GAME_OVER) {
+            startGame();
+          }
+        }
+        
+        // End game with 'x'
+        if ((e.key === 'x' || e.key === 'X') && currentGameState === GAME_STATE.PLAYING) {
+          endGame();
+        }
       });
 
       document.addEventListener('keyup', e => {
@@ -211,6 +276,11 @@
         if (e.key === 'f') {
           followEnabled = !followEnabled;
         }
+      });
+      
+      // Start button click event
+      document.getElementById('startButton').addEventListener('click', () => {
+        startGame();
       });
     }
 
@@ -226,15 +296,152 @@
       }
     }
     
-    function init(){
+    function init() {
       initializePlanets();
       initializeRocket();
       initializeCollectibles();
-      addListeners();
       setInitialCameraFocus();
     }
-
-    init();
+    
+    function drawWelcomeScreen() {
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      
+      // Background with stars
+      ctx.fillStyle = 'black';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // Draw some stars
+      ctx.fillStyle = 'white';
+      for (let i = 0; i < 200; i++) {
+        const size = Math.random() * 2;
+        ctx.fillRect(
+          Math.random() * canvas.width,
+          Math.random() * canvas.height,
+          size, size
+        );
+      }
+      
+      // Draw orbiting planets in background
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      
+      // Sun
+      ctx.fillStyle = 'yellow';
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, 30, 0, Math.PI * 2);
+      ctx.fill();
+      
+      // // Planets
+      // const planetColors = ['gray', 'blue', 'red', 'orange'];
+      // const planetSizes = [5, 8, 6, 10];
+      // const planetDist = [120, 200, 320, 440];
+      
+      // // Calculate angle based on time for animation
+      // const time = Date.now() / 3000;
+      
+      // for (let i = 0; i < 4; i++) {
+      //   const angle = time * (1 / (i + 1)) % (Math.PI * 2);
+      //   const x = centerX + Math.cos(angle) * planetDist[i];
+      //   const y = centerY + Math.sin(angle) * planetDist[i];
+        
+      //   ctx.fillStyle = planetColors[i];
+      //   ctx.beginPath();
+      //   ctx.arc(x, y, planetSizes[i], 0, Math.PI * 2);
+      //   ctx.fill();
+      // }
+      
+      // Title
+      ctx.fillStyle = '#4fc3f7';
+      ctx.font = 'bold 72px SpaceFont, Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('ORBITAL', centerX, centerY - 100);
+      
+      // High score
+      ctx.fillStyle = 'white';
+      ctx.font = '24px Arial';
+      ctx.fillText(`HIGH SCORE: ${highScore}`, centerX,  canvas.height - 150);
+      
+      // Show start button
+      document.getElementById('startButton').style.display = 'block';
+      
+      // Instructions
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = 'white';
+      ctx.font = '16px Arial';
+      ctx.fillText('Arrow keys to control rocket | SPACE for boost | X to end game', centerX, canvas.height - 50);
+      
+      ctx.restore();
+    }
+    
+    function drawGameOverScreen() {
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      
+      // Semi-transparent overlay
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      
+      // Game Over text
+      ctx.fillStyle = '#ff5252';
+      ctx.font = 'bold 72px SpaceFont, Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('GAME OVER', centerX, centerY - 100);
+      
+      // Score
+      ctx.fillStyle = 'white';
+      ctx.font = '36px Arial';
+      ctx.fillText(`SCORE: ${score}`, centerX, centerY);
+      
+      // High score
+      ctx.fillStyle = '#4fc3f7';
+      ctx.font = '24px Arial';
+      ctx.fillText(`HIGH SCORE: ${highScore}`, centerX, centerY + 50);
+      
+      // Show start button with different text
+      const startButton = document.getElementById('startButton');
+      startButton.textContent = 'PLAY AGAIN';
+      startButton.style.display = 'block';
+      
+      ctx.restore();
+    }
+    
+    function updateHighScore() {
+      if (score > highScore) {
+        highScore = score;
+        localStorage.setItem('orbitalHighScore', highScore);
+      }
+    }
+    
+    function resetGame() {
+      // Reset game variables
+      score = 0;
+      rocket.boosters = 0;
+      boosters.length = 0;
+      materials.length = 0;
+      scale = 1;
+      isDragging = false;
+      followEnabled = true;
+      
+      init();
+    }
+    
+    function startGame() {
+      resetGame();
+      currentGameState = GAME_STATE.PLAYING;
+      // Hide the start button when playing
+      document.getElementById('startButton').style.display = 'none';
+    }
+    
+    function endGame() {
+      updateHighScore();
+      currentGameState = GAME_STATE.GAME_OVER;
+    }
 
     // Consume a booster to give the rocket a quick speed burst
     function useBooster() {
@@ -247,6 +454,9 @@
     }
 
     function respondToUserInput() {
+      // Only respond to input in PLAYING state
+      if (currentGameState !== GAME_STATE.PLAYING) return;
+      
       // Handle rocket controls
       if (keys['ArrowLeft']) rocket.rotation -= 0.05;
       if (keys['ArrowRight']) rocket.rotation += 0.05;
@@ -515,39 +725,48 @@
     function update() {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      if (followEnabled) {
-        updateCameraPosition();
-      }
-
-      ctx.setTransform(scale, 0, 0, scale, canvas.width / 2 + offsetX, canvas.height / 2 + offsetY);
-
-      // Update physics (with small time step for stability)
-      const dt = TIME_SCALE; // Apply time scale to slow down simulation
-      updatePhysics(dt);
       
-      updateCollectibles(dt);
-      
-      // Draw everything
-      drawPlanet(sun);
+      if (currentGameState === GAME_STATE.WELCOME) {
+        drawWelcomeScreen();
+      } else if (currentGameState === GAME_STATE.PLAYING) {
+        if (followEnabled) {
+          updateCameraPosition();
+        }
 
-      for (let i = 0; i < planets.length; i++) {
-        drawPlanet(planets[i]);
+        ctx.setTransform(scale, 0, 0, scale, canvas.width / 2 + offsetX, canvas.height / 2 + offsetY);
+
+        // Update physics (with small time step for stability)
+        const dt = TIME_SCALE; // Apply time scale to slow down simulation
+        updatePhysics(dt);
+        
+        updateCollectibles(dt);
+        
+        // Draw everything
+        drawPlanet(sun);
+
+        for (let i = 0; i < planets.length; i++) {
+          drawPlanet(planets[i]);
+        }
+
+        drawCollectibles();
+
+        drawRocket();
+
+        respondToUserInput();
+       
+        drawHUD();
+        
+        // DEBUG_show_orbital_info();
+      } else if (currentGameState === GAME_STATE.GAME_OVER) {
+        drawGameOverScreen();
       }
-
-      drawCollectibles();
-
-      drawRocket();
-
-      respondToUserInput();
-     
-      drawHUD();
-
-      // DEBUG_show_orbital_info();
 
       requestAnimationFrame(update);
     }
 
+
+    addListeners();
+    
     requestAnimationFrame(update);
   </script>
 </body>
