@@ -303,83 +303,152 @@
       setInitialCameraFocus();
     }
     
-    function drawWelcomeScreen() {
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      
-      // Background with stars
-      ctx.fillStyle = 'black';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      
-      // Draw some stars
-      ctx.fillStyle = 'white';
-      for (let i = 0; i < 200; i++) {
-        const size = Math.random() * 2;
-        ctx.fillRect(
-          Math.random() * canvas.width,
-          Math.random() * canvas.height,
-          size, size
-        );
-      }
-      
-      // Draw orbiting planets in background
-      const centerX = canvas.width / 2;
-      const centerY = canvas.height / 2;
-      
-      // Sun
-      ctx.fillStyle = 'yellow';
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, 30, 0, Math.PI * 2);
-      ctx.fill();
-      
-      // // Planets
-      // const planetColors = ['gray', 'blue', 'red', 'orange'];
-      // const planetSizes = [5, 8, 6, 10];
-      // const planetDist = [120, 200, 320, 440];
-      
-      // // Calculate angle based on time for animation
-      // const time = Date.now() / 3000;
-      
-      // for (let i = 0; i < 4; i++) {
-      //   const angle = time * (1 / (i + 1)) % (Math.PI * 2);
-      //   const x = centerX + Math.cos(angle) * planetDist[i];
-      //   const y = centerY + Math.sin(angle) * planetDist[i];
-        
-      //   ctx.fillStyle = planetColors[i];
-      //   ctx.beginPath();
-      //   ctx.arc(x, y, planetSizes[i], 0, Math.PI * 2);
-      //   ctx.fill();
-      // }
-      
-      // Title
-      ctx.fillStyle = '#4fc3f7';
-      ctx.font = 'bold 72px SpaceFont, Arial';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('ORBITAL', centerX, centerY - 100);
+    // Persistent galaxy clusters for welcome screen
+    let galaxyClusters = [];
 
-      // Previous score (if available)
-      if (score > 0) {
+    let welcomeScreenCount = 0;
+
+    function drawWelcomeScreen() {
+      if(welcomeScreenCount++%4 === 0){
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        
+        // Background with stars
+        ctx.fillStyle = 'black';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Draw elliptical starfield
+        // ctx.fillStyle = 'white';
+        const starCount = 400;
+        const ellipseAngle = Math.PI / 6; // 30 degrees
+        const ellipseA = canvas.width * 0.6; // major axis
+        const ellipseB = canvas.height * 0.3; // minor axis
+        // Declare centerX and centerY ONCE for the whole function
+        const centerX = canvas.width / 2;
+        const centerY = canvas.height / 2;
+        for (let i = 0; i < starCount; i++) {
+          // Angle around ellipse
+          const theta = Math.random() * 2 * Math.PI;
+          // Random radius with bias toward the ellipse edge
+          const r = Math.random() * Math.random();
+          // Elliptical coordinates before rotation
+          let x = r * ellipseA * Math.cos(theta);
+          let y = r * ellipseB * Math.sin(theta);
+          // Rotate ellipse
+          const rotX = x * Math.cos(ellipseAngle) - y * Math.sin(ellipseAngle);
+          const rotY = x * Math.sin(ellipseAngle) + y * Math.cos(ellipseAngle);
+          // Add some random scatter
+          const scatter = 15;
+          const sx = centerX + rotX + (Math.random() - 0.5) * scatter;
+          const sy = centerY + rotY + (Math.random() - 0.5) * scatter;
+          const size = Math.random() * 1.7 + 1.7;
+          ctx.fillStyle = i % 3 === 0 ? '#b0c4de' : (i % 4 === 0 ? '#ffeedd' : 'white');
+          
+            `ctx.globalAlpha = 0.7 + Math.random() * 0.3;`
+          ctx.fillRect(sx, sy, size, size);
+        }
+
+        // Draw persistent galaxy clusters
+        // Re-generate clusters if canvas size changed or not yet initialized
+        if (
+          !galaxyClusters.length 
+        ) {
+          galaxyClusters = [];
+          const galaxyCount = 2 + Math.floor(Math.random() * 2); // 2-3 clusters
+          for (let g = 0; g < galaxyCount; g++) {
+            const gx = 2/3 + Math.random()/3;
+            const gy = 1/3 - Math.random()/3;
+            galaxyClusters.push({ gx, gy });
+          }
+          for (let g = 0; g < galaxyCount; g++) {
+            const gx = 1/3 - Math.random()/3;
+            const gy = 2/3 + Math.random()/3;
+            galaxyClusters.push({ gx, gy });
+          }
+        }
+        // Draw clusters with twinkling effect
+        for (const cluster of galaxyClusters) {
+          const clusterStars = 10 + Math.floor(Math.random() * 10);
+          // Store relative angle and distance for each star in the cluster
+          for (let s = 0; s < clusterStars; s++) {
+            const angle = Math.random() * 2 * Math.PI;
+            const dist = Math.pow(Math.random(), 1.5) * 28; // tightly packed
+            const sx = cluster.gx * canvas.width + Math.cos(angle) * dist;
+            const sy = cluster.gy * canvas.height+ Math.sin(angle) * dist;
+            // Twinkle: randomize alpha and size each frame
+            ctx.fillStyle = s % 3 === 0 ? '#b0c4de' : (s % 4 === 0 ? '#ffeedd' : 'white');
+            ctx.globalAlpha = 0.7 + Math.random() * 0.3;
+            ctx.beginPath();
+            ctx.arc(sx, sy, Math.random() * 1.3 + 0.7, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.globalAlpha = 1.0;
+          }
+        }
+                
+        // Title
+        ctx.fillStyle = '#4fc3f7';
+        ctx.font = 'bold 72px SpaceFont, Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('ORBITAL', centerX, centerY - 100);
+
+        // Previous score (if available)
+        if (score > 0) {
+          ctx.fillStyle = 'white';
+          ctx.font = '16px Arial';
+          ctx.fillText(`LAST SCORE: ${score}`, centerX, canvas.height - 200);
+        }
+        
+        // High score
+        ctx.fillStyle = 'white';
+        ctx.font = '24px Arial';
+        ctx.fillText(`HIGH SCORE: ${highScore}`, centerX,  canvas.height - 150);
+        
+        // Show start button
+        document.getElementById('startButton').style.display = 'block';
+        
+        // Instructions
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.fillStyle = 'white';
         ctx.font = '16px Arial';
-        ctx.fillText(`LAST SCORE: ${score}`, centerX, canvas.height - 200);
+        ctx.fillText('Arrow keys to control rocket | SPACE for boost | X to end game', centerX, canvas.height - 50);
+        
+        ctx.restore();
       }
-      
-      // High score
-      ctx.fillStyle = 'white';
-      ctx.font = '24px Arial';
-      ctx.fillText(`HIGH SCORE: ${highScore}`, centerX,  canvas.height - 150);
-      
-      // Show start button
-      document.getElementById('startButton').style.display = 'block';
-      
-      // Instructions
+    }
+
+    function gameFrame() {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.fillStyle = 'white';
-      ctx.font = '16px Arial';
-      ctx.fillText('Arrow keys to control rocket | SPACE for boost | X to end game', centerX, canvas.height - 50);
-      
-      ctx.restore();
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+     
+        if (followEnabled) {
+          updateCameraPosition();
+        }
+
+        ctx.setTransform(scale, 0, 0, scale, canvas.width / 2 + offsetX, canvas.height / 2 + offsetY);
+
+        // Update physics (with small time step for stability)
+        const dt = TIME_SCALE; // Apply time scale to slow down simulation
+        updatePhysics(dt);
+        
+        updateCollectibles(dt);
+        
+        // Draw everything
+        drawPlanet(sun);
+
+        for (let i = 0; i < planets.length; i++) {
+          drawPlanet(planets[i]);
+        }
+
+        drawCollectibles();
+
+        drawRocket();
+
+        respondToUserInput();
+
+        drawHUD();
+        
+        // DEBUG_show_orbital_info();
     }
     
     function drawGameOverScreen() {
@@ -443,6 +512,7 @@
     function endGame() {
       updateHighScore();
       currentGameState = GAME_STATE.GAME_OVER;
+      welcomeScreenCount = 0;
       setTimeout(() => {
         currentGameState = GAME_STATE.WELCOME;
       }, 3000);
@@ -452,7 +522,7 @@
     function useBooster() {
       if (rocket.boosters > 0) {
         rocket.boosters--;
-        const BOOST_POWER = 1; // Stronger than normal thrust
+        const BOOST_POWER = 0.5; // Stronger than normal thrust
         rocket.vx += Math.sin(rocket.rotation) * BOOST_POWER;
         rocket.vy -= Math.cos(rocket.rotation) * BOOST_POWER;
       }
@@ -728,40 +798,11 @@
 
     
     function update() {
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
       
       if (currentGameState === GAME_STATE.WELCOME) {
         drawWelcomeScreen();
       } else if (currentGameState === GAME_STATE.PLAYING) {
-        if (followEnabled) {
-          updateCameraPosition();
-        }
-
-        ctx.setTransform(scale, 0, 0, scale, canvas.width / 2 + offsetX, canvas.height / 2 + offsetY);
-
-        // Update physics (with small time step for stability)
-        const dt = TIME_SCALE; // Apply time scale to slow down simulation
-        updatePhysics(dt);
-        
-        updateCollectibles(dt);
-        
-        // Draw everything
-        drawPlanet(sun);
-
-        for (let i = 0; i < planets.length; i++) {
-          drawPlanet(planets[i]);
-        }
-
-        drawCollectibles();
-
-        drawRocket();
-
-        respondToUserInput();
-       
-        drawHUD();
-        
-        // DEBUG_show_orbital_info();
+        gameFrame();
       } else if (currentGameState === GAME_STATE.GAME_OVER) {
         drawGameOverScreen();
       }
