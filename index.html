@@ -182,6 +182,7 @@
     const rocket = {
       angle: 0,
       rotation: Math.PI/2, // Start facing down (PI/2 radians = 90 degrees in the new system)
+      rotationSpeed: 0.05,
       vx: 0,
       vy: 0,
       x: 0,
@@ -533,8 +534,8 @@
       if (currentGameState !== GAME_STATE.PLAYING) return;
       
       // Handle rocket controls
-      if (keys['ArrowLeft']) rocket.rotation -= 0.05;
-      if (keys['ArrowRight']) rocket.rotation += 0.05;
+      if (keys['ArrowLeft']) rocket.rotation -= rocket.rotationSpeed;
+      if (keys['ArrowRight']) rocket.rotation += rocket.rotationSpeed;
       if (keys['ArrowUp']) {
         // Apply thrust in the direction the rocket is pointing
         rocket.vx += Math.sin(rocket.rotation) * rocket.thrustPower;
