@@ -99,7 +99,7 @@
     
     // Calculate mass based on radius (assuming density is constant)
     function calculateMass(radius) {
-      return Math.pow(radius, 3) * (1-Math.random()/10) // Scale factor for game physics
+      return Math.pow(radius, 3) * (1-Math.random()/10) * planetGravityFactor; // Scale factor for game physics
     }
     
     // Calculate orbital velocity for a circular orbit
@@ -202,9 +202,7 @@
         rocket.y = bluePlanet.y;
         
         // Calculate proper orbital velocity around the blue planet using Kepler's laws
-        // This uses the enhanced planet gravity factor to match the simulation
-        const enhancedPlanetMass = bluePlanet.mass * planetGravityFactor;
-        const rocketOrbitSpeed = calculateOrbitalVelocity(enhancedPlanetMass, orbitDist);
+        const rocketOrbitSpeed = calculateOrbitalVelocity(bluePlanet.mass, orbitDist);
         
         // The rocket should orbit clockwise (to match downward orientation)
         // For a rocket positioned to the right of the planet, velocity should be downward
@@ -647,17 +645,9 @@
         rocket.vy *= 0.9999;
         return { fx: 0, fy: 0, distSq };
       }
-
-      // Special case: if one of the bodies is the rocket and the other is a planet
-      let gravityMultiplier = 1;
-      
-      // Check if body1 is the rocket and body2 is not the sun
-      if (body1 === rocket && body2.mass < sun.mass) {
-        gravityMultiplier = planetGravityFactor;
-      }
-      
+            
       // Force magnitude (Newton's law of universal gravitation)
-      const force = G * body1.mass * body2.mass * gravityMultiplier / distSq;
+      const force = G * body1.mass * body2.mass / distSq;
 
       if(force < 5){
         return { fx: 0, fy: 0, distSq };  
