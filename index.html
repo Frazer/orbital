@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Orbital</title>
   <style>
-    body { margin: 0; background: black; overflow: hidden; }
+    body { margin: 0; background: #02030a; overflow: hidden; }
     canvas { display: block; cursor: grab; }
     @font-face {
       font-family: 'SpaceFont';
@@ -14,7 +14,7 @@
     }
     .start-button {
       position: absolute;
-      top: 65%;
+      top: 66%;
       left: 50%;
       transform: translate(-50%, -50%);
       padding: 15px 30px;
@@ -25,11 +25,11 @@
       font-size: 24px;
       font-family: 'SpaceFont', Arial, sans-serif;
       cursor: pointer;
-      transition: all 0.3s;
+      transition: background 0.3s;
       animation: pulse 1.5s infinite;
       outline: none;
       z-index: 100;
-      display: none; /* Initially hidden, shown via JS */
+      display: none; /* shown by the welcome screen */
     }
     .start-button:hover {
       background: rgba(79, 195, 247, 0.5);
@@ -45,766 +45,1757 @@
 <body>
   <canvas id="solarSystem"></canvas>
   <button id="startButton" class="start-button">START GAME</button>
+  <script src="audio.js"></script>
   <script>
+    // =====================================================================
+    //  ORBITAL — a game of gravity
+    // =====================================================================
     const canvas = document.getElementById('solarSystem');
     const ctx = canvas.getContext('2d');
+    const startButton = document.getElementById('startButton');
+    let W = canvas.width = window.innerWidth;
+    let H = canvas.height = window.innerHeight;
 
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
+    // ---------- Physics ----------
+    const G = 0.1;                      // gravitational constant (scaled for game physics)
+    const TIME_SCALE = 0.01;            // simulation time per tick
+    const TICK_MS = 1000 / 60;          // fixed physics step
+    const planetGravityFactor = 800;    // planet mass multiplier so planets pull hard on the rocket
+    const MIN_FORCE = 5;                // below this force gravity is ignored, so deep space is straight-line flight
 
-    const cameraSmoothness = 0.01; // Adjust for faster/slower smooth camera (0.03 = 3% movement per frame)
+    // ---------- Game tuning ----------
+    const START_FUEL = 150, MAX_FUEL = 999, FUEL_PER_PICKUP = 100;
+    const START_LIVES = 3, MAX_LIVES = 5;
+    const ORE_POINTS = 10, COMBO_WINDOW = 180, MAX_COMBO = 5;
+    const TIME_BONUS_PER_SECOND = 5, LEVEL_BONUS = 500;
+    const COLLECT_RADIUS_SQ = 16;
+    const DEFAULT_STAR = { radius: 30, color: '#fde047', mass: 1000000, luminosity: 1, heatRadius: 120 };   // a level's star: {...} overrides these
+    const NEAR_ZOOM = 4, FAR_ZOOM = 1;
+    const CAMERA_SMOOTHNESS = 0.03;
+    const PREDICT_STEPS_NEAR = 450, PREDICT_STEPS_FAR = 1500, PREDICT_EVERY = 3;   // look further ahead in deep space
+    const TRAIL_LENGTH = 160;
+    // Battery (levels with battery: true). The nav AI that draws the flight path drains it, solar
+    // panels recharge it with inverse-square falloff from the sun, and fuel can be burnt into charge.
+    const BATTERY_MAX = 100;
+    const NAV_DRAIN = 3;                              // battery per second while the nav AI runs
+    const NAV_MIN_CHARGE = 5;                         // charge needed to switch the nav AI back on
+    const SOLAR_RATE = 1.0, SOLAR_DISTANCE = 800;     // battery per second at SOLAR_DISTANCE from the sun
+    const CHARGE_RATE = 20, CHARGE_FUEL_COST = 3;     // battery per second while recharging; fuel per battery point (a full charge costs 300 fuel)
 
-    // Physics constants
-    const G = 0.1; // Gravitational constant (scaled for game physics)
-    const TIME_SCALE = 0.01; // Slow down the simulation (1.0 = normal speed, lower = slower)
-    const planetGravityFactor = 800; // Extremely strong planet gravity influence on rocket
+    // ---------- Levels ----------
+    // goal.type 'ore'   : collect goal.count ore anywhere
+    // goal.type 'visit' : collect at least one ore at every planet
+    const LEVELS = [
+      { name: 'FIRST ORBIT', theme: 'calm',
+        brief: 'Collect 10 ore from orbit around Terra.',
+        hint: 'UP thrusts, LEFT / RIGHT turn. The dotted line is where you are headed.',
+        goal: { type: 'ore', count: 10 }, time: 150,
+        planets: [
+          { name: 'Terra', radius: 8, distance: 800, color: '#3b82f6', home: true, ore: 14, fuel: 8 },
+        ] },
+      { name: 'NEIGHBOURS', theme: 'drive',
+        brief: 'Rust is rich in ore. Fly there and collect 12.',
+        hint: 'Burn along your direction of travel to break orbit. SPACE fires boosters for a big push.',
+        goal: { type: 'ore', count: 12 }, time: 300,
+        planets: [
+          { name: 'Terra', radius: 8, distance: 800, color: '#3b82f6', home: true, ore: 5, fuel: 10 },
+          { name: 'Rust', radius: 6, distance: 1150, color: '#ef4444', ore: 14, fuel: 6, startAngle: 1.0 },
+        ] },
+      { name: 'CLOSE QUARTERS', theme: 'drive', nearZoom: 1.6,
+        star: { heatRadius: 60 },
+        brief: 'Three worlds packed tight around the sun. Collect 14 ore.',
+        hint: 'Every world pulls on you here. Short burns go a long way.',
+        goal: { type: 'ore', count: 14 }, time: 300,
+        planets: [
+          { name: 'Pebble', radius: 5, distance: 130, color: '#9ca3af', ore: 6, fuel: 4, startAngle: 0.0 },
+          { name: 'Terra', radius: 8, distance: 220, color: '#3b82f6', home: true, ore: 10, fuel: 8, startAngle: 2.1 },
+          { name: 'Rust', radius: 6, distance: 340, color: '#ef4444', ore: 8, fuel: 5, startAngle: 4.2 },
+        ] },
+      { name: 'GRAND TOUR', theme: 'epic',
+        brief: 'Collect at least one ore from every planet.',
+        hint: 'Burn against your direction of travel as you arrive to get captured into orbit.',
+        goal: { type: 'visit' }, time: 420,
+        planets: [
+          { name: 'Terra', radius: 8, distance: 800, color: '#3b82f6', home: true, ore: 6, fuel: 10 },
+          { name: 'Rust', radius: 6, distance: 1150, color: '#ef4444', ore: 8, fuel: 5, startAngle: 1.0 },
+          { name: 'Titan', radius: 11, distance: 1600, color: '#f59e0b', ore: 10, fuel: 6, startAngle: -0.8 },
+        ] },
+      { name: 'THE BELT', theme: 'tense', battery: true,
+        brief: 'Cross the asteroid belt and collect 20 ore.',
+        hint: 'Asteroids shatter rockets. The nav AI shows impacts, but it now drains your battery.',
+        notes: ['NEW SYSTEM: BATTERY. The nav AI that draws your flight path now drains it.',
+                'N switches the nav AI off to save charge. Hold R to burn fuel into charge: 3 fuel per 1%.',
+                'Solar panels recharge the battery, fastest near the sun.'],
+        goal: { type: 'ore', count: 20 }, time: 360,
+        planets: [
+          { name: 'Terra', radius: 8, distance: 700, color: '#3b82f6', home: true, ore: 10, fuel: 10 },
+          { name: 'Titan', radius: 11, distance: 1500, color: '#f59e0b', ore: 16, fuel: 6, startAngle: 0.9 },
+        ],
+        asteroids: { count: 45, inner: 1000, outer: 1180 } },
+      { name: 'SUN GRAZER', theme: 'heat', battery: true,
+        brief: 'Mine 10 ore from Ember, deep in the sun\'s gravity well.',
+        hint: 'Your hull overheats near the sun. Keep your distance.',
+        notes: ['Solar panels work overtime this close to the sun.'],
+        goal: { type: 'ore', count: 10 }, time: 300,
+        planets: [
+          { name: 'Terra', radius: 8, distance: 800, color: '#3b82f6', home: true, ore: 4, fuel: 10 },
+          { name: 'Ember', radius: 5, distance: 270, color: '#a3a3a3', ore: 14, fuel: 5, startAngle: 2.0 },
+        ] },
+      { name: 'DEEP SPACE', theme: 'deep', battery: true,
+        brief: 'Strip-mine the whole system: collect 40 ore.',
+        hint: 'A long haul through five worlds. Pace yourself.',
+        notes: ['Far from the sun your solar panels are weak. Budget fuel for recharging, or fly by eye.'],
+        goal: { type: 'ore', count: 40 }, time: 720,
+        planets: [
+          { name: 'Terra', radius: 8, distance: 800, color: '#3b82f6', home: true, ore: 8, fuel: 10 },
+          { name: 'Ember', radius: 5, distance: 270, color: '#a3a3a3', ore: 10, fuel: 4, startAngle: 2.5 },
+          { name: 'Rust', radius: 6, distance: 1150, color: '#ef4444', ore: 12, fuel: 6, startAngle: -1.5 },
+          { name: 'Titan', radius: 11, distance: 1650, color: '#f59e0b', ore: 14, fuel: 6, startAngle: 0.9 },
+          { name: 'Frost', radius: 9, distance: 2150, color: '#a5f3fc', ore: 12, fuel: 6, startAngle: 3.5 },
+        ],
+        asteroids: { count: 40, inner: 1350, outer: 1480 } },
+      { name: 'CRIMSON', theme: 'dusk', battery: true,
+        star: { name: 'Crimson', radius: 18, color: '#f87171', mass: 400000, luminosity: 0.35, heatRadius: 70 },
+        brief: 'A dim red dwarf. Collect one ore from each of its three worlds.',
+        hint: 'Weak sunlight means weak solar power. Burn fuel to recharge, or fly dark.',
+        goal: { type: 'visit' }, time: 420,
+        planets: [
+          { name: 'Ash', radius: 7, distance: 450, color: '#9ca3af', home: true, ore: 6, fuel: 10 },
+          { name: 'Cinder', radius: 6, distance: 720, color: '#fb923c', ore: 8, fuel: 6, startAngle: 2.2 },
+          { name: 'Dusk', radius: 9, distance: 1050, color: '#c084fc', ore: 10, fuel: 6, startAngle: -1.2 },
+        ] },
+      { name: 'TWIN BELTS', theme: 'tense', battery: true,
+        brief: 'Two asteroid belts guard the outer worlds. Collect 24 ore.',
+        hint: 'Thread the gaps. The nav AI flags impacts, if you can afford to run it.',
+        goal: { type: 'ore', count: 24 }, time: 480,
+        planets: [
+          { name: 'Terra', radius: 8, distance: 650, color: '#3b82f6', home: true, ore: 8, fuel: 10 },
+          { name: 'Rust', radius: 6, distance: 1250, color: '#ef4444', ore: 12, fuel: 6, startAngle: 1.4 },
+          { name: 'Titan', radius: 11, distance: 1900, color: '#f59e0b', ore: 14, fuel: 6, startAngle: -2.0 },
+        ],
+        asteroids: [{ count: 40, inner: 900, outer: 1050 }, { count: 45, inner: 1500, outer: 1650 }] },
+      { name: 'AZURE GIANT', theme: 'epic', battery: true,
+        star: { name: 'Azure', radius: 60, color: '#60a5fa', mass: 3000000, luminosity: 2.5, heatRadius: 260 },
+        brief: 'A blue giant burns hot and bright. Collect 20 ore.',
+        hint: 'Solar power is huge here, but so is the heat zone. Orbits are fast.',
+        goal: { type: 'ore', count: 20 }, time: 420,
+        planets: [
+          { name: 'Cobalt', radius: 8, distance: 1400, color: '#3b82f6', home: true, ore: 8, fuel: 10 },
+          { name: 'Pyre', radius: 5, distance: 900, color: '#fbbf24', ore: 10, fuel: 4, startAngle: 2.6 },
+          { name: 'Halo', radius: 12, distance: 2100, color: '#e0e7ff', ore: 12, fuel: 6, startAngle: -0.6 },
+        ] },
+      { name: 'RETROGRADE', theme: 'storm', battery: true,
+        brief: 'Two worlds orbit the wrong way. Collect one ore from every planet.',
+        hint: 'Meeting a retrograde planet head-on is fast and deadly. Match its direction first.',
+        goal: { type: 'visit' }, time: 480,
+        planets: [
+          { name: 'Terra', radius: 8, distance: 800, color: '#3b82f6', home: true, ore: 6, fuel: 10 },
+          { name: 'Vortex', radius: 7, distance: 1150, color: '#a78bfa', ore: 8, fuel: 6, startAngle: 1.0, retro: true },
+          { name: 'Mirror', radius: 9, distance: 1550, color: '#f472b6', ore: 8, fuel: 6, startAngle: -2.2, retro: true },
+        ] },
+      { name: 'DRY RUN', theme: 'deep', battery: true, startFuel: 400,
+        brief: 'No fuel depots in this system. Collect 18 ore on what you carry.',
+        hint: 'Boosters and recharging both burn fuel. Spend it wisely.',
+        goal: { type: 'ore', count: 18 }, time: 420,
+        planets: [
+          { name: 'Terra', radius: 8, distance: 750, color: '#3b82f6', home: true, ore: 8, fuel: 0 },
+          { name: 'Rust', radius: 6, distance: 1100, color: '#ef4444', ore: 10, fuel: 0, startAngle: 2.0 },
+          { name: 'Titan', radius: 11, distance: 1550, color: '#f59e0b', ore: 10, fuel: 0, startAngle: -1.0 },
+        ] },
+      { name: 'BLACKOUT', theme: 'void', noNav: true,
+        star: { name: 'Umbra', radius: 24, color: '#c4b5fd', mass: 800000, luminosity: 0.6, heatRadius: 100 },
+        brief: 'Solar flares have fried the nav AI. Collect 15 ore flying by eye.',
+        hint: 'No flight path here. Watch your trail and trust your instincts.',
+        goal: { type: 'ore', count: 15 }, time: 420,
+        planets: [
+          { name: 'Pale', radius: 8, distance: 700, color: '#cbd5e1', home: true, ore: 10, fuel: 8 },
+          { name: 'Grave', radius: 6, distance: 1050, color: '#64748b', ore: 12, fuel: 6, startAngle: 2.4 },
+        ] },
+      { name: 'GAUNTLET', theme: 'heat', battery: true,
+        star: { name: 'Furnace', radius: 40, color: '#fb923c', mass: 1600000, luminosity: 1.6, heatRadius: 200 },
+        brief: 'A dense belt, a scorching star, and 30 ore to haul.',
+        hint: 'The inner world skims the heat zone. Mine fast and get out.',
+        goal: { type: 'ore', count: 30 }, time: 540,
+        planets: [
+          { name: 'Forge', radius: 8, distance: 950, color: '#f97316', home: true, ore: 10, fuel: 10 },
+          { name: 'Scorch', radius: 5, distance: 380, color: '#fde68a', ore: 12, fuel: 4, startAngle: 1.8 },
+          { name: 'Anvil', radius: 12, distance: 1900, color: '#78716c', ore: 16, fuel: 6, startAngle: -0.4 },
+        ],
+        asteroids: { count: 80, inner: 1250, outer: 1500 } },
+      { name: 'HOMEWORLDS', theme: 'calm', battery: true, nearZoom: 1.5,
+        star: { heatRadius: 60 },
+        brief: 'The tight little system where it all began. Collect 20 ore.',
+        hint: 'Four worlds within a stone\'s throw. Watch for planets crossing your path.',
+        goal: { type: 'ore', count: 20 }, time: 420,
+        planets: [
+          { name: 'Pebble', radius: 5, distance: 120, color: '#9ca3af', ore: 6, fuel: 4, startAngle: 0.0 },
+          { name: 'Terra', radius: 8, distance: 200, color: '#3b82f6', home: true, ore: 10, fuel: 8, startAngle: 1.6 },
+          { name: 'Rust', radius: 6, distance: 320, color: '#ef4444', ore: 8, fuel: 5, startAngle: 3.3 },
+          { name: 'Titan', radius: 10, distance: 440, color: '#f59e0b', ore: 10, fuel: 6, startAngle: 4.9 },
+        ] },
+      { name: 'ARCHIPELAGO', theme: 'calm', battery: true,
+        star: { name: 'Harbor', radius: 28, color: '#fef08a', mass: 900000, luminosity: 1.1, heatRadius: 110 },
+        brief: 'Five small worlds in a tight chain. Collect one ore from each.',
+        hint: 'Short hops, lots of captures. Burn retrograde as you arrive at each world.',
+        goal: { type: 'visit' }, time: 540,
+        planets: [
+          { name: 'Reef', radius: 5, distance: 500, color: '#2dd4bf', home: true, ore: 4, fuel: 8 },
+          { name: 'Cay', radius: 5, distance: 700, color: '#fbbf24', ore: 4, fuel: 4, startAngle: 1.5 },
+          { name: 'Atoll', radius: 6, distance: 900, color: '#60a5fa', ore: 4, fuel: 4, startAngle: -2.0 },
+          { name: 'Shoal', radius: 5, distance: 1100, color: '#a3e635', ore: 4, fuel: 4, startAngle: 3.0 },
+          { name: 'Lagoon', radius: 7, distance: 1350, color: '#c084fc', ore: 4, fuel: 4, startAngle: -0.5 },
+        ] },
+      { name: 'SPRINT', theme: 'storm', battery: true,
+        brief: 'One world, one hundred seconds. Collect 15 ore before the clock runs out.',
+        hint: 'No time to coast. Change orbit early and sweep both belts.',
+        goal: { type: 'ore', count: 15 }, time: 100,
+        planets: [
+          { name: 'Dash', radius: 8, distance: 800, color: '#f472b6', home: true, ore: 20, fuel: 8 },
+        ] },
+      { name: 'NIGHTFALL', theme: 'void', noNav: true,
+        star: { name: 'Nocturne', radius: 26, color: '#818cf8', mass: 900000, luminosity: 0.5, heatRadius: 100 },
+        brief: 'A dead nav AI and a belt in the dark. Collect 16 ore.',
+        hint: 'No flight path, and rocks between the worlds. Cross the belt slowly and watch your trail.',
+        goal: { type: 'ore', count: 16 }, time: 480,
+        planets: [
+          { name: 'Shade', radius: 8, distance: 750, color: '#94a3b8', home: true, ore: 10, fuel: 8 },
+          { name: 'Wraith', radius: 7, distance: 1250, color: '#cbd5e1', ore: 12, fuel: 6, startAngle: 2.0 },
+        ],
+        asteroids: { count: 35, inner: 950, outer: 1080 } },
+      { name: 'EXPANSE', theme: 'deep', battery: true,
+        star: { name: 'Pallid', radius: 28, color: '#fef3c7', mass: 1100000, luminosity: 0.8, heatRadius: 130 },
+        brief: 'Worlds flung far apart. Collect 30 ore across the long transits.',
+        hint: 'Sunlight fades with distance. Recharge before you head for the rim.',
+        goal: { type: 'ore', count: 30 }, time: 720,
+        planets: [
+          { name: 'Haven', radius: 8, distance: 900, color: '#3b82f6', home: true, ore: 8, fuel: 10 },
+          { name: 'Drift', radius: 6, distance: 1700, color: '#fb923c', ore: 10, fuel: 6, startAngle: 1.2 },
+          { name: 'Verge', radius: 10, distance: 2600, color: '#a5f3fc', ore: 12, fuel: 6, startAngle: -1.8 },
+          { name: 'Rim', radius: 7, distance: 3400, color: '#e879f9', ore: 10, fuel: 6, startAngle: 2.9 },
+        ] },
+      { name: 'SWARM', theme: 'storm', battery: true, nearZoom: 1.4,
+        star: { name: 'Hive', radius: 22, color: '#fbbf24', mass: 700000, luminosity: 1.2, heatRadius: 50 },
+        brief: 'Five worlds crammed around a small star. Collect one ore from each.',
+        hint: 'Gravity from every direction. Let the planets fling you between them.',
+        goal: { type: 'visit' }, time: 480,
+        planets: [
+          { name: 'Mite', radius: 4, distance: 110, color: '#d4d4d8', ore: 4, fuel: 3, startAngle: 0.0 },
+          { name: 'Drone', radius: 6, distance: 180, color: '#4ade80', ore: 5, fuel: 4, startAngle: 1.3 },
+          { name: 'Nest', radius: 8, distance: 260, color: '#3b82f6', home: true, ore: 6, fuel: 8, startAngle: 2.5 },
+          { name: 'Queen', radius: 10, distance: 360, color: '#a855f7', ore: 6, fuel: 5, startAngle: 3.8 },
+          { name: 'Husk', radius: 5, distance: 470, color: '#f97316', ore: 5, fuel: 4, startAngle: 5.0 },
+        ] },
+      { name: 'OMEGA', theme: 'storm', battery: true,
+        star: { name: 'Omega', radius: 36, color: '#fde047', mass: 1200000, luminosity: 0.9, heatRadius: 150 },
+        brief: 'The last system. Strip it of 50 ore to conquer the galaxy.',
+        hint: 'Everything at once: belts, a retrograde world, and a long haul. Good luck, pilot.',
+        goal: { type: 'ore', count: 50 }, time: 900,
+        planets: [
+          { name: 'Terra', radius: 8, distance: 850, color: '#3b82f6', home: true, ore: 10, fuel: 10 },
+          { name: 'Ember', radius: 5, distance: 320, color: '#a3a3a3', ore: 10, fuel: 4, startAngle: 2.5 },
+          { name: 'Rust', radius: 6, distance: 1200, color: '#ef4444', ore: 10, fuel: 6, startAngle: -1.5, retro: true },
+          { name: 'Titan', radius: 11, distance: 1700, color: '#f59e0b', ore: 12, fuel: 6, startAngle: 0.9 },
+          { name: 'Frost', radius: 9, distance: 2300, color: '#a5f3fc', ore: 12, fuel: 6, startAngle: 3.5 },
+          { name: 'Nyx', radius: 7, distance: 2900, color: '#818cf8', ore: 10, fuel: 6, startAngle: -2.8 },
+        ],
+        asteroids: [{ count: 40, inner: 1400, outer: 1520 }, { count: 40, inner: 2500, outer: 2650 }] },
+    ];
 
-    // Visual constants
-    const COLLECTIBLE_RADIUS = 1;
-    const BOOSTER_COLOR = 'green';
-    const MATERIAL_COLOR = 'gold';
+    // ---------- State ----------
+    const GAME_STATE = { WELCOME: 'welcome', MAP: 'map', LEVEL_INTRO: 'intro', PLAYING: 'playing', LEVEL_COMPLETE: 'complete', GAME_OVER: 'gameover', WIN: 'win' };
 
-    // Game state management
-    const GAME_STATE = {
-      WELCOME: 'welcome',
-      PLAYING: 'playing',
-      GAME_OVER: 'gameover'
-    };
-    
-    let scale = 1;
-    let offsetX = 0;
-    let offsetY = 0;
-    let isDragging = false;
-    let lastX, lastY;
-    let followEnabled = true; // Camera following is enabled by default
-    let targetOffsetX = 0;
-    let targetOffsetY = 0;
-
-    let closestPlanet = null;
-    let closestDistanceSQ = Infinity;
-
-    // Initialize planets with position, velocity and mass
+    const sun = Object.assign({ x: 0, y: 0, name: 'Sol', alwaysPulls: true }, DEFAULT_STAR);   // never cut off, so a rocket shares its planet's frame
     const planets = [];
-    
-    // ------------------ GAME COLLECTIBLES ------------------
-    // Arrays for booster items and material items orbiting planets
-    const boosters = [];    // Each item: { planet, angle, distance, x, y }
-    const materials = [];   // Each item: { planet, angle, distance, x, y }
-    
-    // Player scoring & booster count
-    let score = 0;
-    let highScore = localStorage.getItem('orbitalHighScore') || 0;
-    
-    let currentGameState = GAME_STATE.WELCOME;
-    
-    // Calculate mass based on radius (assuming density is constant)
-    function calculateMass(radius) {
-      return Math.pow(radius, 3) * (1-Math.random()/10) * planetGravityFactor; // Scale factor for game physics
-    }
-    
-    // Calculate orbital velocity for a circular orbit
-    function calculateOrbitalVelocity(centralMass, orbitRadius) {
-      // For a circular orbit: v = sqrt(G * M / r)
-      return Math.sqrt(G * centralMass / orbitRadius);
-    }
+    const ores = [];
+    const fuels = [];
+    const asteroids = [];
+    const particles = [];
+    const rings = [];
+    const popups = [];
+    const trail = [];
+    let trailFrame = null;        // body the trail points are stored relative to (null: the sun, which never moves)
+    let stars = [];
+    const sunOnly = [sun];
+    let gravBodies = [sun];
 
-    const sun = {
-      x: 0,
-      y: 0,
-      radius: 30,
-      color: 'yellow',
-      mass: 1000000 // Much larger mass for the sun to dominate gravitational effects
-    };
-    
-    
-    function initializePlanets() {
-      // Planet data: radius, distance from sun, color
-      const planetData = [
-        { radius: 5, distance: 120, color: 'gray' },
-        { radius: 8, distance: 200, color: 'blue' },
-        { radius: 6, distance: 320, color: 'red' },
-        { radius: 10, distance: 440, color: 'orange' }
-      ];
-
-      planets.length = 0;
-      
-      // Create planets with proper orbital velocities
-      for (const data of planetData) {
-        const mass = calculateMass(data.radius);
-        const orbitalVelocity = calculateOrbitalVelocity(sun.mass, data.distance);
-        
-        planets.push({
-          radius: data.radius,
-          x: data.distance, // Start along positive x-axis
-          y: 0,
-          vx: 0,
-          vy: orbitalVelocity, // Velocity in y direction for circular orbit
-          color: data.color,
-          mass: mass
-        });
-      }
-    }
-
-    // Spawn a handful of boosters & materials in orbit around each planet
-    function initializeCollectibles() {
-      const MIN_DISTANCE_FROM_PLANET = 10; // offset from surface
-
-      for (const planet of planets) {
-        const orbitalDistance = planet.radius + MIN_DISTANCE_FROM_PLANET;
-        const BOOSTERS_PER_PLANET = Math.floor(planet.radius*1.4);
-        const MATERIALS_PER_PLANET = Math.floor(planet.radius*2);
-      
-        // Boosters
-        for (let i = 0; i < BOOSTERS_PER_PLANET; i++) {
-          boosters.push({
-            planet,
-            angle: Math.random() * Math.PI * 2,
-            distance: orbitalDistance + Math.random() * 5,
-            x: 0,
-            y: 0
-          });
-        }
-
-        // Materials
-        for (let i = 0; i < MATERIALS_PER_PLANET; i++) {
-          materials.push({
-            planet,
-            angle: Math.random() * Math.PI * 2,
-            distance: orbitalDistance + Math.random() * 3,
-            x: 0,
-            y: 0
-          });
-        }
-      }
-    }
-
-    // Rocket object containing all rocket properties
     const rocket = {
-      angle: 0,
-      rotation: Math.PI/2, // Start facing down (PI/2 radians = 90 degrees in the new system)
+      x: 0, y: 0, vx: 0, vy: 0,
+      rotation: Math.PI,          // direction of thrust; PI points "down" (+y) on screen
       rotationSpeed: 0.05,
-      vx: 0,
-      vy: 0,
-      x: 0,
-      y: 0,
-      mass: 20, // Mass of the rocket
-      thrustPower: 0.05, // Thrust power when engine is fired
-      boosters: 0, // Number of collected boosters
+      mass: 20,
+      thrustPower: 0.06,
+      boostPower: 0.5,
+      fuel: 0, battery: 0, charging: false,
+      dead: false, respawnTimer: 0, heat: 0, invuln: 0,
+      thrusting: false, boosting: false,
     };
 
-    function initializeRocket() {
-      // Set rocket initial position near blue planet
-      const bluePlanet = planets.find(p => p.color === 'blue');
-      if (bluePlanet) {
-        // Position rocket close to the blue planet
-        const orbitDist = bluePlanet.radius + 2; 
-        rocket.x = bluePlanet.x + orbitDist;
-        rocket.y = bluePlanet.y;
-        
-        // Calculate proper orbital velocity around the blue planet using Kepler's laws
-        const rocketOrbitSpeed = calculateOrbitalVelocity(bluePlanet.mass, orbitDist);
-        
-        // The rocket should orbit clockwise (to match downward orientation)
-        // For a rocket positioned to the right of the planet, velocity should be downward
-        rocket.rotation = Math.PI/2; // Make sure rocket is facing down (90 degrees in our system)
-        rocket.vx = 0;
-        rocket.vy = rocketOrbitSpeed + bluePlanet.vy ; 
-      }
-    }
+    const game = {
+      state: GAME_STATE.WELCOME, levelIndex: 0, level: null,
+      score: 0, lives: START_LIVES, ore: 0, timeLeft: 0, lastSec: -1, hot: false,
+      ticks: 0, stateTimer: 0, combo: 0, comboTimer: 0,
+      gameOverReason: '', deathReason: '', stats: null,
+      nav: true,                  // nav AI switched on (only matters on battery levels)
+      inRun: false,               // a run is in progress (score and lives carry across the star map)
+    };
+    let highScore = parseInt(localStorage.getItem('orbitalHighScore')) || 0;
+    let maxLevelReached = parseInt(localStorage.getItem('orbitalMaxLevel')) || 0;   // index of the furthest level unlocked
+    let cleared = parseInt(localStorage.getItem('orbitalCleared')) || 0;            // number of levels completed
+    const map = { selected: 0, rocketAt: 0, travel: null, hover: -1 };             // star map: chosen system, where the rocket sits, flight in progress
 
+    const camera = { scale: 1, zoomMul: 1, focusX: 0, focusY: 0, offsetX: 0, offsetY: 0, follow: true, shake: 0 };   // focus is the world point at screen centre; offsets are derived
+    let closestPlanet = null, closestDistanceSQ = Infinity;
+    const prediction = { pts: [], hit: null, frame: null };   // pts are relative to frame (a body) when set
+    const predBodies = [];
+    let predGrav = [sun];
+    const predRocket = { x: 0, y: 0, vx: 0, vy: 0, mass: 20 };
+    const tmpForce = { fx: 0, fy: 0 };
+    let isDragging = false, lastX = 0, lastY = 0;
     const keys = {};
-    
-    function addListeners(){
-      // add zoom, pan, and key listeners
+    const ui = { boost: false, charge: false };   // on-screen buttons being held
+    let pressedButton = null, hoverButton = null;
+    let audioThrust = false, audioBoost = false;
+    const welcome = { rocketAngle: 0 };
 
-      // Resize canvas when window is resized
-      window.addEventListener('resize', () => {
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
-      });
-
-      canvas.addEventListener('wheel', e => {
-        e.preventDefault();
-        const zoom = Math.exp(-e.deltaY * 0.001);
-        scale *= zoom;
-        offsetX -= (e.offsetX - canvas.width / 2 - offsetX) * (zoom - 1);
-        offsetY -= (e.offsetY - canvas.height / 2 - offsetY) * (zoom - 1);
-      }, { passive: false });
-
-      canvas.addEventListener('mousedown', e => {
-        isDragging = true;
-        lastX = e.clientX;
-        lastY = e.clientY;
-        
-        // Stop following when user drags
-        followEnabled = false;
-      });
-
-      canvas.addEventListener('mousemove', e => {
-        if (isDragging) {
-          offsetX += e.clientX - lastX;
-          offsetY += e.clientY - lastY;
-          lastX = e.clientX;
-          lastY = e.clientY;
-        }
-      });
-
-      canvas.addEventListener('mouseup', () => isDragging = false);
-      canvas.addEventListener('mouseleave', () => isDragging = false);
-
-      document.addEventListener('keydown', e => {
-        keys[e.key] = true;
-        
-        // Game state control
-        if (e.key === ' ' || e.code === 'Space') {
-          if (currentGameState === GAME_STATE.WELCOME ||currentGameState === GAME_STATE.GAME_OVER) {
-            startGame();
-          }
-        }
-        
-        // End game with 'x'
-        if ((e.key === 'x' || e.key === 'X') && currentGameState === GAME_STATE.PLAYING) {
-          endGame();
-        }
-      });
-
-      document.addEventListener('keyup', e => {
-        keys[e.key] = false;
-        
-        // Toggle camera follow mode with 'f' key
-        if (e.key === 'f') {
-          followEnabled = !followEnabled;
-        }
-      });
-      
-      // Start button click event
-      document.getElementById('startButton').addEventListener('click', () => {
-        startGame();
-      });
+    // ---------- Helpers ----------
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const smoothstep = t => t * t * (3 - 2 * t);
+    function hexToRgb(hex) { const n = parseInt(hex.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function shade(hex, f) {
+      const [r, g, b] = hexToRgb(hex);
+      return `rgb(${clamp(Math.round(r * f), 0, 255)},${clamp(Math.round(g * f), 0, 255)},${clamp(Math.round(b * f), 0, 255)})`;
     }
+    function rgba(hex, a) { const [r, g, b] = hexToRgb(hex); return `rgba(${r},${g},${b},${a})`; }
+    function formatTime(s) { s = Math.max(0, Math.ceil(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
+    function worldToScreen(x, y) { return { x: x * camera.scale + W / 2 + camera.offsetX, y: y * camera.scale + H / 2 + camera.offsetY }; }
+    function calculateMass(radius) { return Math.pow(radius, 3) * planetGravityFactor; }
+    function orbitalVelocity(centralMass, r) { return Math.sqrt(G * centralMass / r); }
+    function soiRadius(mass) { return Math.sqrt(G * rocket.mass * mass / MIN_FORCE); }   // where the rocket stops feeling a body
+    function homePlanet() { return planets.find(p => p.home) || planets[0]; }
+    function levelBelts(L) { const A = L && L.asteroids; return !A ? [] : Array.isArray(A) ? A : [A]; }   // a level may have one belt or several
 
-    function setInitialCameraFocus() {
-    
-      // Initialize camera focus on blue planet (as a starting point)
-      const bluePlanet = planets.find(p => p.color === 'blue');
-      if (bluePlanet) {
-        offsetX = -bluePlanet.x * scale;
-        offsetY = -bluePlanet.y * scale;
-        targetOffsetX = offsetX;
-        targetOffsetY = offsetY;
-      }
-    }
-    
-    function init() {
-      initializePlanets();
-      initializeRocket();
-      initializeCollectibles();
-      setInitialCameraFocus();
-    }
-    
-    // Persistent galaxy clusters for welcome screen
-    let galaxyClusters = [];
-
-    let welcomeScreenCount = 0;
-
-    function drawWelcomeScreen() {
-      if(welcomeScreenCount++%4 === 0){
-        ctx.save();
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        
-        // Background with stars
-        ctx.fillStyle = 'black';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        
-        // Draw elliptical starfield
-        // ctx.fillStyle = 'white';
-        const starCount = 400;
-        const ellipseAngle = Math.PI / 6; // 30 degrees
-        const ellipseA = canvas.width * 0.6; // major axis
-        const ellipseB = canvas.height * 0.3; // minor axis
-        // Declare centerX and centerY ONCE for the whole function
-        const centerX = canvas.width / 2;
-        const centerY = canvas.height / 2;
-        for (let i = 0; i < starCount; i++) {
-          // Angle around ellipse
-          const theta = Math.random() * 2 * Math.PI;
-          // Random radius with bias toward the ellipse edge
-          const r = Math.random() * Math.random();
-          // Elliptical coordinates before rotation
-          let x = r * ellipseA * Math.cos(theta);
-          let y = r * ellipseB * Math.sin(theta);
-          // Rotate ellipse
-          const rotX = x * Math.cos(ellipseAngle) - y * Math.sin(ellipseAngle);
-          const rotY = x * Math.sin(ellipseAngle) + y * Math.cos(ellipseAngle);
-          // Add some random scatter
-          const scatter = 15;
-          const sx = centerX + rotX + (Math.random() - 0.5) * scatter;
-          const sy = centerY + rotY + (Math.random() - 0.5) * scatter;
-          const size = Math.random() * 1.7 + 1.7;
-          ctx.fillStyle = i % 3 === 0 ? '#b0c4de' : (i % 4 === 0 ? '#ffeedd' : 'white');
-          
-            `ctx.globalAlpha = 0.7 + Math.random() * 0.3;`
-          ctx.fillRect(sx, sy, size, size);
-        }
-
-        // Draw persistent galaxy clusters
-        // Re-generate clusters if canvas size changed or not yet initialized
-        if (
-          !galaxyClusters.length 
-        ) {
-          galaxyClusters = [];
-          const galaxyCount = 2 + Math.floor(Math.random() * 2); // 2-3 clusters
-          for (let g = 0; g < galaxyCount; g++) {
-            const gx = 2/3 + Math.random()/3;
-            const gy = 1/3 - Math.random()/3;
-            galaxyClusters.push({ gx, gy });
-          }
-          for (let g = 0; g < galaxyCount; g++) {
-            const gx = 1/3 - Math.random()/3;
-            const gy = 2/3 + Math.random()/3;
-            galaxyClusters.push({ gx, gy });
-          }
-        }
-        // Draw clusters with twinkling effect
-        for (const cluster of galaxyClusters) {
-          const clusterStars = 10 + Math.floor(Math.random() * 10);
-          // Store relative angle and distance for each star in the cluster
-          for (let s = 0; s < clusterStars; s++) {
-            const angle = Math.random() * 2 * Math.PI;
-            const dist = Math.pow(Math.random(), 1.5) * 28; // tightly packed
-            const sx = cluster.gx * canvas.width + Math.cos(angle) * dist;
-            const sy = cluster.gy * canvas.height+ Math.sin(angle) * dist;
-            // Twinkle: randomize alpha and size each frame
-            ctx.fillStyle = s % 3 === 0 ? '#b0c4de' : (s % 4 === 0 ? '#ffeedd' : 'white');
-            ctx.globalAlpha = 0.7 + Math.random() * 0.3;
-            ctx.beginPath();
-            ctx.arc(sx, sy, Math.random() * 1.3 + 0.7, 0, 2 * Math.PI);
-            ctx.fill();
-            ctx.globalAlpha = 1.0;
-          }
-        }
-                
-        // Title
-        ctx.fillStyle = '#4fc3f7';
-        ctx.font = 'bold 72px SpaceFont, Arial';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('ORBITAL', centerX, centerY - 100);
-
-        // Previous score (if available)
-        if (score > 0) {
-          ctx.fillStyle = 'white';
-          ctx.font = '16px Arial';
-          ctx.fillText(`LAST SCORE: ${score}`, centerX, canvas.height - 200);
-        }
-        
-        // High score
-        ctx.fillStyle = 'white';
-        ctx.font = '24px Arial';
-        ctx.fillText(`HIGH SCORE: ${highScore}`, centerX,  canvas.height - 150);
-        
-        // Show start button
-        document.getElementById('startButton').style.display = 'block';
-        
-        // Instructions
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.fillStyle = 'white';
-        ctx.font = '16px Arial';
-        ctx.fillText('Arrow keys to control rocket | SPACE for boost | X to end game', centerX, canvas.height - 50);
-        
-        ctx.restore();
+    // ---------- World building ----------
+    function makeStars() {
+      stars = [];
+      const n = Math.floor(W * H / 5000);
+      for (let i = 0; i < n; i++) {
+        stars.push({ x: Math.random() * W, y: Math.random() * H, size: Math.random() * 1.6 + 0.4,
+                     par: 0.05 + Math.random() * 0.25, phase: Math.random() * Math.PI * 2,
+                     tint: i % 5 === 0 ? '#b0c4de' : (i % 7 === 0 ? '#ffe4c4' : '#ffffff') });
       }
     }
 
-    function gameFrame() {
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-     
-        if (followEnabled) {
-          updateCameraPosition();
+    function buildLevel(def) {
+      planets.length = 0; ores.length = 0; fuels.length = 0; asteroids.length = 0;
+      particles.length = 0; rings.length = 0; popups.length = 0; trail.length = 0;
+      Object.assign(sun, DEFAULT_STAR, def.star || {});
+      def.planets.forEach((d, i) => {
+        const mass = calculateMass(d.radius);
+        const a = d.startAngle === undefined ? i * 1.7 : d.startAngle;
+        const v = orbitalVelocity(sun.mass, d.distance) * (d.retro ? -1 : 1);   // retrograde worlds orbit the other way
+        const p = {
+          name: d.name, radius: d.radius, color: d.color, mass, home: !!d.home, distance: d.distance, retro: !!d.retro,
+          x: Math.cos(a) * d.distance, y: Math.sin(a) * d.distance,
+          vx: -Math.sin(a) * v, vy: Math.cos(a) * v,
+          soi: soiRadius(mass), oreTotal: d.ore, collected: 0,
+        };
+        planets.push(p);
+        // Ore sits in two belts: a low one the starting orbit skims, and a high one that needs a burn to reach.
+        for (let k = 0; k < d.ore; k++) {
+          const distance = k % 2 === 0 ? p.radius + 5 + Math.random() * 7 : p.radius + 24 + Math.random() * 12;
+          ores.push({ planet: p, angle: Math.random() * Math.PI * 2, distance, x: 0, y: 0, phase: Math.random() * Math.PI * 2 });
         }
-
-        ctx.setTransform(scale, 0, 0, scale, canvas.width / 2 + offsetX, canvas.height / 2 + offsetY);
-
-        // Update physics (with small time step for stability)
-        const dt = TIME_SCALE; // Apply time scale to slow down simulation
-        updatePhysics(dt);
-        
-        updateCollectibles(dt);
-        
-        // Draw everything
-        drawPlanet(sun);
-
-        for (let i = 0; i < planets.length; i++) {
-          drawPlanet(planets[i]);
+        for (let k = 0; k < d.fuel; k++) {
+          fuels.push({ planet: p, angle: Math.random() * Math.PI * 2, distance: p.radius + 12 + Math.random() * 12, x: 0, y: 0, phase: Math.random() * Math.PI * 2 });
         }
-
-        drawCollectibles();
-
-        drawRocket();
-
-        respondToUserInput();
-
-        drawHUD();
-        
-        // DEBUG_show_orbital_info();
+      });
+      for (const A of levelBelts(def)) {
+        for (let k = 0; k < A.count; k++) {
+          const dist = A.inner + Math.random() * (A.outer - A.inner);
+          const radius = 3 + Math.random() * 3;
+          const shape = [];
+          const sides = 6 + Math.floor(Math.random() * 3);
+          for (let s = 0; s < sides; s++) {
+            const ang = s / sides * Math.PI * 2, r = radius * (0.7 + Math.random() * 0.5);
+            shape.push([Math.cos(ang) * r, Math.sin(ang) * r]);
+          }
+          asteroids.push({ dist, angle: Math.random() * Math.PI * 2, omega: orbitalVelocity(sun.mass, dist) / dist,
+                           radius, shape, rot: Math.random() * Math.PI * 2, rotSpeed: (Math.random() - 0.5) * 0.02, x: 0, y: 0 });
+        }
+      }
+      gravBodies = [sun, ...planets];
+      predBodies.length = 0;
+      for (const p of planets) predBodies.push({ x: 0, y: 0, vx: 0, vy: 0, mass: p.mass, radius: p.radius });
+      predGrav = [sun, ...predBodies];
+      for (const a of asteroids) { a.x = Math.cos(a.angle) * a.dist; a.y = Math.sin(a.angle) * a.dist; }
+      moveCollectibles(0);
     }
-    
-    function drawGameOverScreen() {
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      
-      // Semi-transparent overlay
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      
-      const centerX = canvas.width / 2;
-      const centerY = canvas.height / 2;
-      
-      // Game Over text
-      ctx.fillStyle = '#ff5252';
-      ctx.font = 'bold 72px SpaceFont, Arial';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('GAME OVER', centerX, centerY - 100);
-      
-      // Score
-      ctx.fillStyle = 'white';
-      ctx.font = '36px Arial';
-      ctx.fillText(`SCORE: ${score}`, centerX, canvas.height - 200);
-      
-      // High score
-      ctx.fillStyle = '#4fc3f7';
-      ctx.font = '24px Arial';
-      ctx.fillText(`HIGH SCORE: ${highScore}`, centerX, canvas.height - 150);
-      
-      ctx.restore();
+
+    // Put the rocket into a circular orbit around the home planet, facing prograde.
+    function spawnRocket() {
+      const home = homePlanet();
+      const orbitDist = home.radius + 12;
+      const v = orbitalVelocity(home.mass, orbitDist);
+      rocket.x = home.x + orbitDist;
+      rocket.y = home.y;
+      rocket.vx = home.vx;
+      rocket.vy = home.vy + v;
+      rocket.rotation = Math.PI;
+      rocket.dead = false; rocket.heat = 0; rocket.invuln = 120; rocket.thrusting = false; rocket.boosting = false;
+      trail.length = 0; trailFrame = null;
+      rocket.battery = BATTERY_MAX; rocket.charging = false;
+      closestPlanet = home; closestDistanceSQ = orbitDist * orbitDist;
     }
-    
+
+    // ---------- Physics ----------
+    function gravityAt(x, y, mass, bodies, out) {
+      let fx = 0, fy = 0;
+      for (let i = 0; i < bodies.length; i++) {
+        const b = bodies[i];
+        const dx = b.x - x, dy = b.y - y;
+        const core = b.radius * b.radius * 0.25;
+        const d2 = Math.max(dx * dx + dy * dy, core);
+        const f = G * mass * b.mass / d2;
+        if (f < MIN_FORCE && !b.alwaysPulls) continue;
+        const d = Math.sqrt(d2);
+        fx += f * dx / d; fy += f * dy / d;
+      }
+      out.fx = fx; out.fy = fy;
+    }
+    function integrate(b, f, dt) {
+      b.vx += f.fx / b.mass * dt;
+      b.vy += f.fy / b.mass * dt;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+    }
+
+    function stepWorld() {
+      const dt = TIME_SCALE;
+      for (const p of planets) { gravityAt(p.x, p.y, p.mass, sunOnly, tmpForce); integrate(p, tmpForce, dt); }
+      for (const a of asteroids) {
+        a.angle += a.omega * dt;
+        a.x = Math.cos(a.angle) * a.dist; a.y = Math.sin(a.angle) * a.dist;
+        a.rot += a.rotSpeed;
+      }
+      if (!rocket.dead) {
+        gravityAt(rocket.x, rocket.y, rocket.mass, gravBodies, tmpForce);
+        integrate(rocket, tmpForce, dt);
+      }
+      closestPlanet = null; closestDistanceSQ = Infinity;
+      for (const b of gravBodies) {
+        const dx = b.x - rocket.x, dy = b.y - rocket.y, d2 = dx * dx + dy * dy;
+        if (d2 < closestDistanceSQ) { closestDistanceSQ = d2; closestPlanet = b; }
+      }
+      if (!rocket.dead && game.ticks % 2 === 0) recordTrail();
+      moveCollectibles(dt);
+      if (rocket.invuln > 0) rocket.invuln--;
+    }
+
+    // The body whose sphere of influence the rocket is inside, if any. Paths are stored relative to
+    // it, so an orbit around a moving planet draws as a loop instead of a stretched spiral.
+    function dominantBody() {
+      if (!closestPlanet) return null;
+      const soi = closestPlanet === sun ? soiRadius(sun.mass) : closestPlanet.soi;
+      return closestDistanceSQ < soi * soi ? closestPlanet : null;
+    }
+    function recordTrail() {
+      const frame = dominantBody();
+      if (frame !== trailFrame) {   // re-base the stored points so the line never jumps when the frame changes
+        const ox = (trailFrame ? trailFrame.x : 0) - (frame ? frame.x : 0);
+        const oy = (trailFrame ? trailFrame.y : 0) - (frame ? frame.y : 0);
+        for (let i = 0; i < trail.length; i += 2) { trail[i] += ox; trail[i + 1] += oy; }
+        trailFrame = frame;
+      }
+      trail.push(rocket.x - (frame ? frame.x : 0), rocket.y - (frame ? frame.y : 0));
+      if (trail.length > TRAIL_LENGTH * 2) trail.splice(0, 2);
+    }
+
+    function moveCollectibles(dt) {
+      const move = item => {
+        item.angle += orbitalVelocity(item.planet.mass, item.distance) / item.distance * dt * 0.3;
+        item.x = item.planet.x + Math.cos(item.angle) * item.distance;
+        item.y = item.planet.y + Math.sin(item.angle) * item.distance;
+      };
+      ores.forEach(move); fuels.forEach(move);
+    }
+
+    function collectItems() {
+      for (let i = ores.length - 1; i >= 0; i--) {
+        const o = ores[i];
+        const dx = o.x - rocket.x, dy = o.y - rocket.y;
+        if (dx * dx + dy * dy < COLLECT_RADIUS_SQ) {
+          ores.splice(i, 1);
+          o.planet.collected++;
+          game.ore++;
+          game.combo = game.comboTimer > 0 ? Math.min(MAX_COMBO, game.combo + 1) : 1;
+          game.comboTimer = COMBO_WINDOW;
+          const points = ORE_POINTS * game.combo;
+          game.score += points;
+          popup(o.x, o.y, `+${points}` + (game.combo > 1 ? `  x${game.combo}` : ''), '#facc15');
+          sparkle(o.x, o.y, '#facc15');
+          OrbitalAudio.sfx.collectOre(game.combo);
+          if (goalMet()) { completeLevel(); return; }
+        }
+      }
+      for (let i = fuels.length - 1; i >= 0; i--) {
+        const f = fuels[i];
+        const dx = f.x - rocket.x, dy = f.y - rocket.y;
+        if (dx * dx + dy * dy < COLLECT_RADIUS_SQ) {
+          fuels.splice(i, 1);
+          rocket.fuel = Math.min(MAX_FUEL, rocket.fuel + FUEL_PER_PICKUP);
+          popup(f.x, f.y, `+${FUEL_PER_PICKUP} BOOST`, '#4ade80');
+          sparkle(f.x, f.y, '#4ade80');
+          OrbitalAudio.sfx.collectFuel();
+        }
+      }
+    }
+
+    function checkCollisions() {
+      const ds = Math.hypot(rocket.x - sun.x, rocket.y - sun.y);
+      if (ds < sun.radius + 1) return destroyRocket('Flew into the sun');
+      if (ds < sun.heatRadius) {
+        rocket.heat = Math.min(1, rocket.heat + (1 - ds / sun.heatRadius) * 0.025);
+        if (game.ticks % 20 === 0) OrbitalAudio.sfx.sizzle();
+        if (rocket.heat >= 1) return destroyRocket('Hull melted');
+      } else {
+        rocket.heat = Math.max(0, rocket.heat - 0.004);
+      }
+      for (const p of planets) {
+        const r = p.radius + 1.5;
+        const dx = p.x - rocket.x, dy = p.y - rocket.y;
+        if (dx * dx + dy * dy < r * r) return destroyRocket(`Crashed into ${p.name}`);
+      }
+      for (const a of asteroids) {
+        const r = a.radius + 1.5;
+        const dx = a.x - rocket.x, dy = a.y - rocket.y;
+        if (dx * dx + dy * dy < r * r) return destroyRocket('Hit an asteroid');
+      }
+    }
+
+    function destroyRocket(reason) {
+      if (rocket.dead) return;
+      rocket.dead = true; rocket.respawnTimer = 150; rocket.heat = 0;
+      rocket.thrusting = false; rocket.boosting = false;
+      game.lives--; game.combo = 0; game.comboTimer = 0; game.deathReason = reason;
+      explode(rocket.x, rocket.y, rocket.vx, rocket.vy);
+      camera.shake = 22;
+      popup(rocket.x, rocket.y - 6, reason.toUpperCase(), '#ff5252', 16);
+      OrbitalAudio.sfx.crash();
+      syncEngineAudio();
+    }
+
+    function handleRespawn() {
+      if (!rocket.dead) return;
+      rocket.respawnTimer--;
+      if (rocket.respawnTimer > 0) return;
+      if (game.lives > 0) {
+        spawnRocket();
+        rocket.fuel = Math.max(rocket.fuel, START_FUEL);
+        popup(rocket.x, rocket.y - 8, `${game.lives} ${game.lives === 1 ? 'LIFE' : 'LIVES'} LEFT`, '#4fc3f7');
+        OrbitalAudio.sfx.respawn();
+      } else {
+        endGame(game.deathReason);
+      }
+    }
+
+    // ---------- Trajectory prediction ----------
+    // Simulates the rocket (and the planets) forward from the current state with no further thrust.
+    // When the rocket is inside a body's sphere of influence the path is stored relative to that
+    // body, so a stable orbit draws as a closed loop that moves with its planet.
+    function computePrediction() {
+      const pts = prediction.pts;
+      pts.length = 0; prediction.hit = null; prediction.frame = null;
+      if (rocket.dead || !navActive()) return;
+      for (let i = 0; i < planets.length; i++) {
+        const p = planets[i], b = predBodies[i];
+        b.x = p.x; b.y = p.y; b.vx = p.vx; b.vy = p.vy;
+      }
+      let frameBody = null;
+      prediction.frame = dominantBody();
+      if (prediction.frame) frameBody = prediction.frame === sun ? sun : predBodies[planets.indexOf(prediction.frame)];
+      const r = predRocket;
+      r.x = rocket.x; r.y = rocket.y; r.vx = rocket.vx; r.vy = rocket.vy;
+      const dt = TIME_SCALE;
+      const steps = closestDistanceSQ < 120 * 120 ? PREDICT_STEPS_NEAR : PREDICT_STEPS_FAR;
+      for (let i = 1; i <= steps; i++) {
+        for (const b of predBodies) { gravityAt(b.x, b.y, b.mass, sunOnly, tmpForce); integrate(b, tmpForce, dt); }
+        gravityAt(r.x, r.y, r.mass, predGrav, tmpForce);
+        integrate(r, tmpForce, dt);
+        const fx = frameBody ? frameBody.x : 0, fy = frameBody ? frameBody.y : 0;
+        if (i % PREDICT_EVERY === 0) pts.push(r.x - fx, r.y - fy);
+        let hit = r.x * r.x + r.y * r.y < (sun.radius + 1) * (sun.radius + 1);
+        if (!hit) for (const b of predBodies) {
+          const dx = b.x - r.x, dy = b.y - r.y, rr = b.radius + 1.5;
+          if (dx * dx + dy * dy < rr * rr) { hit = true; break; }
+        }
+        if (!hit && i % 3 === 0) {
+          const t = i * dt;
+          for (const a of asteroids) {
+            const ang = a.angle + a.omega * t;
+            const dx = Math.cos(ang) * a.dist - r.x, dy = Math.sin(ang) * a.dist - r.y, rr = a.radius + 1.5;
+            if (dx * dx + dy * dy < rr * rr) { hit = true; break; }
+          }
+        }
+        if (hit) { prediction.hit = { x: r.x - fx, y: r.y - fy }; pts.push(r.x - fx, r.y - fy); break; }
+      }
+    }
+
+    // ---------- Effects ----------
+    function spawnParticle(x, y, vx, vy, life, size, color) {
+      particles.push({ x, y, vx, vy, life, maxLife: life, size, color });
+    }
+    function updateParticles() {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx; p.y += p.vy; p.vx *= 0.98; p.vy *= 0.98;
+        if (--p.life <= 0) particles.splice(i, 1);
+      }
+      for (let i = rings.length - 1; i >= 0; i--) if (--rings[i].life <= 0) rings.splice(i, 1);
+    }
+    function exhaust(boost) {
+      const dx = Math.sin(rocket.rotation), dy = -Math.cos(rocket.rotation);
+      const n = boost ? 3 : 2;
+      for (let i = 0; i < n; i++) {
+        const side = (Math.random() - 0.5) * 1.2;
+        const speed = (boost ? 1.3 : 0.7) + Math.random() * 0.4;
+        spawnParticle(rocket.x - dx * 2.5 - dy * side, rocket.y - dy * 2.5 + dx * side,
+                      rocket.vx * TIME_SCALE - dx * speed + (Math.random() - 0.5) * 0.2,
+                      rocket.vy * TIME_SCALE - dy * speed + (Math.random() - 0.5) * 0.2,
+                      20 + Math.random() * 20, boost ? 1.4 : 1,
+                      boost ? (Math.random() < 0.5 ? '#60a5fa' : '#e0f2fe') : (Math.random() < 0.5 ? '#fb923c' : '#fde68a'));
+      }
+    }
+    function explode(x, y, vx, vy) {
+      const colors = ['#ffffff', '#fde68a', '#fb923c', '#ef4444'];
+      for (let i = 0; i < 70; i++) {
+        const a = Math.random() * Math.PI * 2, s = 0.3 + Math.random() * 2.5;
+        spawnParticle(x, y, vx * TIME_SCALE + Math.cos(a) * s, vy * TIME_SCALE + Math.sin(a) * s,
+                      30 + Math.random() * 40, 0.8 + Math.random() * 1.5, colors[i % 4]);
+      }
+      rings.push({ x, y, life: 30, maxLife: 30 });
+    }
+    function sparkle(x, y, color) {
+      for (let i = 0; i < 10; i++) {
+        const a = Math.random() * Math.PI * 2, s = 0.3 + Math.random() * 0.8;
+        spawnParticle(x, y, Math.cos(a) * s, Math.sin(a) * s, 20 + Math.random() * 12, 0.6, color);
+      }
+    }
+    function popup(x, y, text, color, size = 14) {
+      popups.push({ x, y, text, color, size, life: 90, maxLife: 90 });
+    }
+    function updatePopups() {
+      for (let i = popups.length - 1; i >= 0; i--) if (--popups[i].life <= 0) popups.splice(i, 1);
+    }
+
+    // ---------- Camera ----------
+    // Zoom in near planets and out in deep space; follow in world space so zooming never drags the view.
+    function updateCamera() {
+      const d = Math.sqrt(closestDistanceSQ);
+      const auto = clamp(260 / Math.max(d, 1), FAR_ZOOM, game.level.nearZoom || NEAR_ZOOM);   // compact systems cap the zoom so they stay in view
+      const target = clamp(auto * camera.zoomMul, 0.25, 8);
+      camera.scale += (target - camera.scale) * 0.05;
+
+      if (camera.follow) {
+        const baseThreshold = 4000;   // follow the planet when the rocket is this close (squared world units)
+        const veryClose = 500;        // snap exactly onto the target below this (squared world units)
+        let obj, distSQ;
+        if (closestPlanet && closestDistanceSQ <= baseThreshold && !rocket.dead) {
+          obj = closestPlanet; distSQ = closestDistanceSQ;
+        } else {
+          obj = rocket;
+          const dx = rocket.x - camera.focusX, dy = rocket.y - camera.focusY;
+          distSQ = dx * dx + dy * dy;
+        }
+        if (distSQ <= veryClose) {
+          camera.focusX = obj.x; camera.focusY = obj.y;
+        } else {
+          const ratio = Math.min(1, (distSQ - veryClose) / (baseThreshold - veryClose));
+          const smooth = CAMERA_SMOOTHNESS + (1 - CAMERA_SMOOTHNESS) * (1 - ratio);
+          camera.focusX += (obj.x - camera.focusX) * smooth;
+          camera.focusY += (obj.y - camera.focusY) * smooth;
+        }
+      }
+      camera.offsetX = -camera.focusX * camera.scale;
+      camera.offsetY = -camera.focusY * camera.scale;
+    }
+
+    // ---------- Game flow ----------
+    function newGame(levelIdx) {
+      game.inRun = true; game.score = 0; game.lives = START_LIVES; rocket.fuel = START_FUEL;
+      startLevel(levelIdx);
+    }
+
+    function startLevel(idx) {
+      const L = LEVELS[idx];
+      game.levelIndex = idx; game.level = L;
+      game.ore = 0; game.timeLeft = L.time; game.lastSec = -1; game.hot = false;
+      game.combo = 0; game.comboTimer = 0; game.ticks = 0; game.stateTimer = 0; game.deathReason = '';
+      game.nav = true; ui.boost = false; ui.charge = false; pressedButton = null;
+      buildLevel(L);
+      spawnRocket();
+      rocket.fuel = Math.max(rocket.fuel, L.startFuel || START_FUEL);
+      const home = homePlanet();
+      camera.follow = true; camera.zoomMul = 1; camera.scale = L.nearZoom || NEAR_ZOOM; camera.shake = 0;
+      camera.focusX = home.x; camera.focusY = home.y;
+      camera.offsetX = -home.x * camera.scale; camera.offsetY = -home.y * camera.scale;
+      computePrediction();
+      game.state = GAME_STATE.LEVEL_INTRO;
+      startButton.style.display = 'none';
+      OrbitalAudio.setIntensity(0);
+      OrbitalAudio.startMusic(L.theme);
+    }
+
+    function beginPlay() {
+      game.state = GAME_STATE.PLAYING; game.stateTimer = 0;
+      keys[' '] = false;
+      OrbitalAudio.sfx.select();
+    }
+
+    function goalMet() {
+      const g = game.level.goal;
+      if (g.type === 'ore') return game.ore >= g.count;
+      return planets.every(p => p.collected > 0);
+    }
+    function goalProgress() {
+      const g = game.level.goal;
+      if (g.type === 'ore') return game.ore / g.count;
+      return planets.filter(p => p.collected > 0).length / planets.length;
+    }
+    function goalText() {
+      const g = game.level.goal;
+      if (g.type === 'ore') return `ORE  ${game.ore} / ${g.count}`;
+      return planets.map(p => (p.collected > 0 ? '✓ ' : '○ ') + p.name.toUpperCase()).join('   ');
+    }
+    function oresLeft(p) { let n = 0; for (const o of ores) if (o.planet === p) n++; return n; }
+    function findTarget() {
+      const g = game.level.goal;
+      let best = null, bestD = Infinity;
+      for (const p of planets) {
+        const wanted = g.type === 'visit' ? p.collected === 0 : oresLeft(p) > 0;
+        if (!wanted) continue;
+        const dx = p.x - rocket.x, dy = p.y - rocket.y, d = dx * dx + dy * dy;
+        if (d < bestD) { bestD = d; best = p; }
+      }
+      return best;
+    }
+
+    function completeLevel() {
+      const timeBonus = Math.floor(game.timeLeft) * TIME_BONUS_PER_SECOND;
+      game.stats = { ore: game.ore, timeLeft: game.timeLeft, timeBonus, levelBonus: LEVEL_BONUS };
+      game.score += timeBonus + LEVEL_BONUS;
+      game.lives = Math.min(MAX_LIVES, game.lives + 1);
+      updateHighScore();
+      maxLevelReached = Math.max(maxLevelReached, Math.min(game.levelIndex + 1, LEVELS.length - 1));
+      localStorage.setItem('orbitalMaxLevel', maxLevelReached);
+      cleared = Math.max(cleared, game.levelIndex + 1);
+      localStorage.setItem('orbitalCleared', cleared);
+      game.state = GAME_STATE.LEVEL_COMPLETE; game.stateTimer = 0;
+      rocket.thrusting = false; rocket.boosting = false;
+      for (let i = 0; i < 6; i++) sparkle(rocket.x + (Math.random() - 0.5) * 20, rocket.y + (Math.random() - 0.5) * 20, ['#facc15', '#4ade80', '#4fc3f7'][i % 3]);
+      OrbitalAudio.stopMusic();
+      OrbitalAudio.sfx.levelComplete();
+      syncEngineAudio();
+    }
+
+    function nextLevel() {
+      if (game.levelIndex + 1 < LEVELS.length) openMap(game.levelIndex + 1, game.levelIndex);   // fly on to the next system
+      else winGame();
+    }
+
+    function winGame() {
+      updateHighScore(); game.inRun = false;
+      game.state = GAME_STATE.WIN; game.stateTimer = 0;
+      OrbitalAudio.sfx.win();
+    }
+
+    function endGame(reason) {
+      updateHighScore(); game.inRun = false;
+      game.gameOverReason = reason;
+      game.state = GAME_STATE.GAME_OVER; game.stateTimer = 0;
+      rocket.thrusting = false; rocket.boosting = false;
+      OrbitalAudio.stopMusic();
+      OrbitalAudio.sfx.gameOver();
+      OrbitalAudio.setIntensity(0);
+      syncEngineAudio();
+    }
+
+    function toWelcome() {
+      game.state = GAME_STATE.WELCOME; game.stateTimer = 0; game.level = null; game.inRun = false;
+      map.travel = null;
+      OrbitalAudio.startMusic('ambient');
+    }
+
+    // ---------- Star map ----------
+    // Every level is a star system. The map shows them all, lets the player pick any unlocked one,
+    // and animates the flight from a finished system to the next.
+    function openMap(select, travelFrom = -1) {
+      game.state = GAME_STATE.MAP; game.stateTimer = 0; game.level = null;
+      map.selected = select; map.rocketAt = travelFrom >= 0 ? travelFrom : select; map.hover = -1;
+      map.travel = travelFrom >= 0 ? { from: travelFrom, to: select, t: 0, duration: 180 } : null;
+      particles.length = 0; rings.length = 0; popups.length = 0;
+      hoverButton = null; pressedButton = null;
+      startButton.style.display = 'none';
+      OrbitalAudio.startMusic('ambient');
+      if (map.travel) OrbitalAudio.sfx.warp();
+    }
+    function mapStarPos(i) {   // the systems snake across the screen in two or three rows
+      const n = LEVELS.length, rows = n > 14 ? 3 : 2, cols = Math.ceil(n / rows);
+      const row = Math.floor(i / cols), k = i - row * cols;
+      const c = row % 2 === 0 ? k : cols - 1 - k;
+      const rowY = rows === 3 ? [0.28, 0.47, 0.66] : [0.40, 0.64];
+      return { x: W * (0.12 + 0.76 * c / Math.max(1, cols - 1)), y: H * rowY[row] + 14 * Math.sin(i * 2.1) };
+    }
+    function mapStarStyle(i) { return Object.assign({}, DEFAULT_STAR, LEVELS[i].star || {}); }
+    function travelPos(T, k) {   // a gentle arc between two systems
+      const A = mapStarPos(T.from), B = mapStarPos(T.to);
+      const dx = B.x - A.x, dy = B.y - A.y, len = Math.hypot(dx, dy) || 1;
+      const bulge = len * 0.18 * Math.sin(Math.PI * k);
+      return { x: A.x + dx * k - dy / len * bulge, y: A.y + dy * k + dx / len * bulge };
+    }
+    function mapStarAt(x, y) {
+      for (let i = 0; i <= maxLevelReached && i < LEVELS.length; i++) {
+        const p = mapStarPos(i);
+        if (Math.hypot(p.x - x, p.y - y) < 24) return i;
+      }
+      return -1;
+    }
+    function selectStar(i) {
+      if (map.travel || i < 0 || i > maxLevelReached || i >= LEVELS.length || i === map.selected) return;
+      map.selected = i;
+      OrbitalAudio.sfx.select();
+    }
+    function launchSelected() {
+      if (map.travel) return;
+      if (game.inRun) startLevel(map.selected); else newGame(map.selected);
+    }
+    function leaveMap() {
+      if (game.inRun) updateHighScore();
+      toWelcome();
+    }
+    function updateTravel() {
+      const T = map.travel;
+      if (!T) return;
+      T.t = Math.min(1, T.t + 1 / T.duration);
+      const k = smoothstep(T.t), p = travelPos(T, k), q = travelPos(T, Math.min(1, k + 0.01));
+      const ang = Math.atan2(q.y - p.y, q.x - p.x);
+      for (let i = 0; i < 2; i++) {   // exhaust, in screen pixels
+        const spread = (Math.random() - 0.5) * 1.2, speed = 2 + Math.random() * 2;
+        spawnParticle(p.x - Math.cos(ang) * 8, p.y - Math.sin(ang) * 8, -Math.cos(ang + spread) * speed, -Math.sin(ang + spread) * speed,
+                      25 + Math.random() * 15, 2.5, i ? '#4fc3f7' : '#ffffff');
+      }
+      if (T.t >= 1) {
+        map.rocketAt = T.to; map.selected = T.to; map.travel = null;
+        OrbitalAudio.sfx.arrive();
+      }
+    }
+
     function updateHighScore() {
-      if (score > highScore) {
-        highScore = score;
+      if (game.score > highScore) {
+        highScore = game.score;
         localStorage.setItem('orbitalHighScore', highScore);
       }
     }
-    
-    function resetGame() {
-      // Reset game variables
-      score = 0;
-      rocket.boosters = 0;
-      boosters.length = 0;
-      materials.length = 0;
-      scale = 1;
-      isDragging = false;
-      followEnabled = true;
-      
-      init();
+
+    function updateTimer() {
+      game.timeLeft -= 1 / 60;
+      const sec = Math.ceil(game.timeLeft);
+      if (sec !== game.lastSec) {
+        game.lastSec = sec;
+        if (sec <= 10 && sec > 0) OrbitalAudio.sfx.tick();
+      }
+      const hot = game.timeLeft < 30;
+      if (hot !== game.hot) { game.hot = hot; OrbitalAudio.setIntensity(hot ? 1 : 0); }
+      if (game.timeLeft <= 0) { game.timeLeft = 0; endGame('Out of time'); }
     }
-    
-    function startGame() {
-      resetGame();
-      currentGameState = GAME_STATE.PLAYING;
-      // Hide the start button when playing
-      document.getElementById('startButton').style.display = 'none';
-    }
-    
-    function endGame() {
-      updateHighScore();
-      currentGameState = GAME_STATE.GAME_OVER;
-      welcomeScreenCount = 0;
-      setTimeout(() => {
-        currentGameState = GAME_STATE.WELCOME;
-      }, 3000);
+    function updateCombo() {
+      if (game.comboTimer > 0 && --game.comboTimer === 0) game.combo = 0;
     }
 
-    // Consume a booster to give the rocket a quick speed burst
-    function useBooster() {
-      if (rocket.boosters > 0) {
-        rocket.boosters--;
-        const BOOST_POWER = 0.5; // Stronger than normal thrust
-        rocket.vx += Math.sin(rocket.rotation) * BOOST_POWER;
-        rocket.vy -= Math.cos(rocket.rotation) * BOOST_POWER;
+    // ---------- Input ----------
+    function unlockAudio() {
+      if (!OrbitalAudio.unlock()) return;
+      if (game.state === GAME_STATE.WELCOME) OrbitalAudio.startMusic('ambient');
+    }
+
+    function handleInput() {
+      if (rocket.dead) return;
+      const left = keys['ArrowLeft'] || keys['a'];
+      const right = keys['ArrowRight'] || keys['d'];
+      const up = keys['ArrowUp'] || keys['w'];
+      const boost = keys[' '] || ui.boost;
+      if (left) rocket.rotation -= rocket.rotationSpeed;
+      if (right) rocket.rotation += rocket.rotationSpeed;
+      const dx = Math.sin(rocket.rotation), dy = -Math.cos(rocket.rotation);
+      rocket.thrusting = !!up;
+      rocket.boosting = !!boost && rocket.fuel > 0;
+      if (rocket.thrusting) {
+        rocket.vx += dx * rocket.thrustPower;
+        rocket.vy += dy * rocket.thrustPower;
+      }
+      if (rocket.boosting) {
+        rocket.fuel = Math.max(0, rocket.fuel - 1);
+        rocket.vx += dx * rocket.boostPower;
+        rocket.vy += dy * rocket.boostPower;
+      }
+      if (rocket.boosting) exhaust(true);
+      else if (rocket.thrusting) exhaust(false);
+    }
+
+    // ---------- Battery and the nav AI ----------
+    function navActive() {
+      if (game.level.noNav) return false;   // some systems have no working nav AI at all
+      return !game.level.battery || (game.nav && rocket.battery > 0);
+    }
+    function solarRate() {
+      const d = Math.max(Math.hypot(rocket.x, rocket.y), sun.radius);
+      return SOLAR_RATE * sun.luminosity * (SOLAR_DISTANCE / d) ** 2;
+    }
+    function powerRate() {   // net battery change per second, shown on the gauge
+      let r = solarRate();
+      if (game.nav) r -= NAV_DRAIN;
+      if (rocket.charging) r += CHARGE_RATE;
+      return r;
+    }
+    function toggleNav() {
+      if (!game.level.battery || rocket.dead) return;
+      if (!game.nav && rocket.battery < NAV_MIN_CHARGE) {
+        popup(rocket.x, rocket.y - 8, 'NO POWER', '#ff5252', 12);
+        OrbitalAudio.sfx.tick();
+        return;
+      }
+      game.nav = !game.nav;
+      popup(rocket.x, rocket.y - 8, game.nav ? 'NAV AI ON' : 'NAV AI OFF', game.nav ? '#4fc3f7' : '#cbd5e1', 12);
+      OrbitalAudio.sfx.select();
+    }
+    function updatePower() {
+      if (!game.level.battery || rocket.dead) { rocket.charging = false; return; }
+      const dt = 1 / 60;
+      rocket.charging = !!(keys['r'] || ui.charge) && rocket.fuel > 0 && rocket.battery < BATTERY_MAX;
+      let b = rocket.battery + solarRate() * dt;
+      if (rocket.charging) {
+        const add = Math.min(CHARGE_RATE * dt, BATTERY_MAX - b, rocket.fuel / CHARGE_FUEL_COST);
+        b += add; rocket.fuel = Math.max(0, rocket.fuel - add * CHARGE_FUEL_COST);
+      }
+      if (game.nav) {
+        b -= NAV_DRAIN * dt;
+        if (b <= 0) {
+          b = 0; game.nav = false;
+          popup(rocket.x, rocket.y - 8, 'NAV AI OFFLINE', '#ff5252', 12);
+          OrbitalAudio.sfx.tick();
+        }
+      }
+      rocket.battery = clamp(b, 0, BATTERY_MAX);
+    }
+
+    function syncEngineAudio() {
+      const playing = game.state === GAME_STATE.PLAYING && !rocket.dead;
+      const th = playing && rocket.thrusting && !rocket.boosting;
+      const bo = playing && rocket.boosting;
+      if (th !== audioThrust) { audioThrust = th; OrbitalAudio.setThrust(th); }
+      if (bo !== audioBoost) { audioBoost = bo; OrbitalAudio.setBoost(bo); }
+    }
+
+    function addListeners() {
+      window.addEventListener('resize', () => {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+        makeStars();
+      });
+      window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; ui.boost = ui.charge = false; pressedButton = null; hoverButton = null; });
+
+      canvas.addEventListener('wheel', e => {
+        e.preventDefault();
+        camera.zoomMul = clamp(camera.zoomMul * Math.exp(-e.deltaY * 0.001), 0.25, 3);
+      }, { passive: false });
+
+      // On-screen console buttons take presses before the camera drag does.
+      function pressAt(x, y) {
+        const S = game.state;
+        if (S === GAME_STATE.MAP) {
+          const b = mapButtonAt(x, y);
+          if (b) { b.press(); return true; }
+          const i = mapStarAt(x, y);
+          if (i < 0 || map.travel) return false;
+          if (i === map.selected) launchSelected(); else selectStar(i);   // a second click on the chosen star launches
+          return true;
+        }
+        if (S === GAME_STATE.LEVEL_INTRO) {
+          if (hit(introButton, x, y) || buttonAt(x, y)) { beginPlay(); return true; }
+          return false;
+        }
+        if (S !== GAME_STATE.PLAYING) return false;
+        const b = buttonAt(x, y);
+        if (!b) return false;
+        pressedButton = b; b.press();
+        return true;
+      }
+      function releasePress() { if (pressedButton) { pressedButton.release(); pressedButton = null; } }
+      canvas.addEventListener('mousedown', e => {
+        unlockAudio();
+        if (pressAt(e.clientX, e.clientY) || game.state === GAME_STATE.MAP) return;
+        isDragging = true; lastX = e.clientX; lastY = e.clientY;
+      });
+      canvas.addEventListener('mousemove', e => {
+        if (!isDragging) {
+          const S = game.state, x = e.clientX, y = e.clientY;
+          hoverButton = S === GAME_STATE.PLAYING ? buttonAt(x, y)
+                      : S === GAME_STATE.MAP ? mapButtonAt(x, y)
+                      : S === GAME_STATE.LEVEL_INTRO && hit(introButton, x, y) ? introButton : null;
+          map.hover = S === GAME_STATE.MAP ? mapStarAt(x, y) : -1;
+          canvas.style.cursor = hoverButton || map.hover >= 0 ? 'pointer' : S === GAME_STATE.MAP ? 'default' : 'grab';
+          return;
+        }
+        const mx = e.clientX - lastX, my = e.clientY - lastY;
+        if (Math.abs(mx) + Math.abs(my) > 2) camera.follow = false;   // dragging the view stops the camera following
+        camera.focusX -= mx / camera.scale; camera.focusY -= my / camera.scale;
+        camera.offsetX = -camera.focusX * camera.scale; camera.offsetY = -camera.focusY * camera.scale;
+        lastX = e.clientX; lastY = e.clientY;
+      });
+      canvas.addEventListener('mouseup', () => { isDragging = false; releasePress(); });
+      canvas.addEventListener('mouseleave', () => { isDragging = false; releasePress(); hoverButton = null; });
+      canvas.addEventListener('touchstart', e => {
+        unlockAudio();
+        const t = e.changedTouches[0];
+        if (t && pressAt(t.clientX, t.clientY)) e.preventDefault();
+      }, { passive: false });
+      canvas.addEventListener('touchend', releasePress);
+      canvas.addEventListener('touchcancel', releasePress);
+
+      document.addEventListener('keydown', e => {
+        unlockAudio();
+        const k = e.key;
+        keys[k] = true;
+        if (k.length === 1) keys[k.toLowerCase()] = true;
+        if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(k)) e.preventDefault();
+        if (e.repeat) return;
+        const S = game.state, confirm = k === ' ' || k === 'Enter';
+        if (k === 'm' || k === 'M') { OrbitalAudio.toggleMute(); return; }
+        if (S === GAME_STATE.WELCOME) {
+          if (confirm) openMap(maxLevelReached);
+        } else if (S === GAME_STATE.MAP) {
+          if (map.travel) { if (confirm) map.travel.t = 1; }   // skip the flight
+          else if (confirm) launchSelected();
+          else if (['ArrowLeft', 'ArrowUp', 'a', 'A', 'w', 'W'].includes(k)) selectStar(map.selected - 1);
+          else if (['ArrowRight', 'ArrowDown', 'd', 'D', 's', 'S'].includes(k)) selectStar(map.selected + 1);
+          else if (k === 'Escape') leaveMap();
+        } else if (S === GAME_STATE.LEVEL_INTRO) {   // only a deliberate launch starts the clock
+          if (confirm) beginPlay();
+          else if (k === 'Escape') openMap(game.levelIndex);
+        } else if (S === GAME_STATE.PLAYING) {
+          if (k === 'x' || k === 'X') endGame('Run abandoned');
+          if (k === 'f' || k === 'F') camera.follow = !camera.follow;
+          if (k === 'n' || k === 'N') toggleNav();
+        } else if (S === GAME_STATE.LEVEL_COMPLETE) {
+          if (confirm && game.stateTimer > 45) nextLevel();
+        } else if (S === GAME_STATE.GAME_OVER || S === GAME_STATE.WIN) {
+          if (confirm && game.stateTimer > 90) toWelcome();
+        }
+      });
+      document.addEventListener('keyup', e => {
+        keys[e.key] = false;
+        if (e.key.length === 1) keys[e.key.toLowerCase()] = false;
+      });
+
+      startButton.addEventListener('click', () => { unlockAudio(); openMap(maxLevelReached); });
+    }
+
+    // ---------- Rendering: world ----------
+    function drawStars(focusX, focusY, t) {
+      for (const s of stars) {
+        const x = ((s.x - focusX * s.par) % W + W) % W;
+        const y = ((s.y - focusY * s.par) % H + H) % H;
+        ctx.globalAlpha = 0.55 + 0.45 * Math.sin(t * 0.03 + s.phase);
+        ctx.fillStyle = s.tint;
+        ctx.fillRect(x, y, s.size, s.size);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawOrbitRings() {
+      ctx.lineWidth = 1 / camera.scale;
+      ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+      for (const p of planets) { ctx.beginPath(); ctx.arc(0, 0, p.distance, 0, Math.PI * 2); ctx.stroke(); }
+      ctx.fillStyle = 'rgba(156,163,175,0.06)';
+      for (const A of levelBelts(game.level)) {
+        ctx.beginPath(); ctx.arc(0, 0, A.outer, 0, Math.PI * 2); ctx.arc(0, 0, A.inner, 0, Math.PI * 2, true); ctx.fill();
       }
     }
 
-    function respondToUserInput() {
-      // Only respond to input in PLAYING state
-      if (currentGameState !== GAME_STATE.PLAYING) return;
-      
-      // Handle rocket controls
-      if (keys['ArrowLeft']) rocket.rotation -= rocket.rotationSpeed;
-      if (keys['ArrowRight']) rocket.rotation += rocket.rotationSpeed;
-      if (keys['ArrowUp']) {
-        // Apply thrust in the direction the rocket is pointing
-        rocket.vx += Math.sin(rocket.rotation) * rocket.thrustPower;
-        rocket.vy -= Math.cos(rocket.rotation) * rocket.thrustPower;
-      }
-      if (keys[' ']) {
-        useBooster();
-      }
+    function drawSun() {
+      const r = sun.radius, pulse = 1 + 0.05 * Math.sin(game.ticks * 0.04);
+      let g = ctx.createRadialGradient(0, 0, r * 0.9, 0, 0, r * 3.2 * pulse);
+      g.addColorStop(0, rgba(sun.color, 0.45));
+      g.addColorStop(0.35, rgba(sun.color, 0.15));
+      g.addColorStop(1, rgba(sun.color, 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, r * 3.2 * pulse, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,82,82,0.25)'; ctx.lineWidth = 1 / camera.scale;
+      ctx.setLineDash([5 / camera.scale, 5 / camera.scale]);
+      ctx.beginPath(); ctx.arc(0, 0, sun.heatRadius, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      g = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.1, 0, 0, r);
+      g.addColorStop(0, '#ffffff'); g.addColorStop(0.5, sun.color); g.addColorStop(1, shade(sun.color, 0.6));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
     }
 
-    function DEBUG_show_orbital_info() {
-      // Debug overlay - show which planet is influencing the rocket most
-      if (closestPlanet && closestDistanceSQ < 10000) {
-        ctx.save();
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.fillStyle = closestPlanet.color;
-        const size = Math.min(200, 40000/closestDistanceSQ);
-        ctx.fillRect(100, 100, size, size );
+    function drawPlanet(p) {
+      const ang = Math.atan2(sun.y - p.y, sun.x - p.x);
+      const r = p.radius;
+      let g = ctx.createRadialGradient(p.x, p.y, r * 0.9, p.x, p.y, r * 1.6);
+      g.addColorStop(0, rgba(p.color, 0.35)); g.addColorStop(1, rgba(p.color, 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r * 1.6, 0, Math.PI * 2); ctx.fill();
+      g = ctx.createRadialGradient(p.x + Math.cos(ang) * r * 0.5, p.y + Math.sin(ang) * r * 0.5, r * 0.1, p.x, p.y, r);
+      g.addColorStop(0, shade(p.color, 1.5)); g.addColorStop(0.6, p.color); g.addColorStop(1, shade(p.color, 0.3));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
+      if (p.soi < p.distance * 0.9) {   // the influence ring only helps when it is smaller than the planet's own orbit
+        ctx.strokeStyle = rgba(p.color, 0.12); ctx.lineWidth = 1 / camera.scale;
+        ctx.setLineDash([6 / camera.scale, 6 / camera.scale]);
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.soi, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.font = `${12 / camera.scale}px SpaceFont, Arial`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillText(p.name.toUpperCase(), p.x, p.y + r * 1.6 + 4 / camera.scale);
+    }
+
+    function drawAsteroids() {
+      for (const a of asteroids) {
+        ctx.save(); ctx.translate(a.x, a.y); ctx.rotate(a.rot);
+        ctx.beginPath();
+        a.shape.forEach(([px, py], i) => i ? ctx.lineTo(px, py) : ctx.moveTo(px, py));
+        ctx.closePath();
+        ctx.fillStyle = '#6b7280'; ctx.fill();
+        ctx.strokeStyle = '#9ca3af'; ctx.lineWidth = 0.5; ctx.stroke();
         ctx.restore();
       }
-    } 
-    
-    function drawPlanet(planet) {
-      ctx.beginPath();
-      ctx.arc(planet.x, planet.y, planet.radius, 0, Math.PI * 2);
-      ctx.fillStyle = planet.color;
-      ctx.fill();
+    }
+
+    function drawCollectibles() {
+      const t = game.ticks;
+      for (const o of ores) {
+        const tw = 0.7 + 0.3 * Math.sin(t * 0.1 + o.phase);
+        ctx.fillStyle = `rgba(250,204,21,${0.25 * tw})`;
+        ctx.beginPath(); ctx.arc(o.x, o.y, 3, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#facc15';
+        ctx.save(); ctx.translate(o.x, o.y); ctx.rotate(t * 0.05 + o.phase); ctx.fillRect(-1.2, -1.2, 2.4, 2.4); ctx.restore();
+      }
+      for (const f of fuels) {
+        ctx.fillStyle = 'rgba(74,222,128,0.25)';
+        ctx.beginPath(); ctx.arc(f.x, f.y, 3, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#4ade80';
+        ctx.beginPath(); ctx.arc(f.x, f.y, 1.3, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#bbf7d0'; ctx.lineWidth = 0.4;
+        ctx.beginPath(); ctx.arc(f.x, f.y, 2.1, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+
+    function drawTrail() {
+      if (trail.length < 4) return;
+      ctx.save();
+      if (trailFrame) ctx.translate(trailFrame.x, trailFrame.y);   // the trail moves with the body it was flown around
+      ctx.lineWidth = 1 / camera.scale;
+      const n = trail.length / 2;
+      for (let i = 2; i < trail.length; i += 2) {
+        ctx.strokeStyle = `rgba(255,255,255,${0.35 * (i / 2) / n})`;
+        ctx.beginPath(); ctx.moveTo(trail[i - 2], trail[i - 1]); ctx.lineTo(trail[i], trail[i + 1]); ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawPrediction() {
+      const pts = prediction.pts;
+      if (pts.length < 4 || rocket.dead) return;
+      ctx.save();
+      if (prediction.frame) ctx.translate(prediction.frame.x, prediction.frame.y);
+      ctx.lineWidth = 1.2 / camera.scale;
+      ctx.setLineDash([4 / camera.scale, 4 / camera.scale]);
+      ctx.strokeStyle = prediction.hit ? 'rgba(255,82,82,0.75)' : 'rgba(79,195,247,0.55)';
+      ctx.beginPath(); ctx.moveTo(pts[0], pts[1]);
+      for (let i = 2; i < pts.length; i += 2) ctx.lineTo(pts[i], pts[i + 1]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (prediction.hit) {
+        const h = prediction.hit, s = 4 / camera.scale;
+        ctx.strokeStyle = '#ff5252'; ctx.lineWidth = 1.5 / camera.scale;
+        ctx.beginPath(); ctx.moveTo(h.x - s, h.y - s); ctx.lineTo(h.x + s, h.y + s); ctx.moveTo(h.x + s, h.y - s); ctx.lineTo(h.x - s, h.y + s); ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawParticles() {
+      for (const p of particles) {
+        const k = p.life / p.maxLife;
+        ctx.globalAlpha = k; ctx.fillStyle = p.color;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.size * (0.5 + 0.5 * k), 0, Math.PI * 2); ctx.fill();
+      }
+      for (const r of rings) {
+        const k = r.life / r.maxLife;
+        ctx.globalAlpha = k; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5 / camera.scale;
+        ctx.beginPath(); ctx.arc(r.x, r.y, (1 - k) * 30, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // Rocket in local units, nose pointing +x.
+    function drawRocketShape(thrusting, boosting, flat) {
+      ctx.beginPath(); ctx.moveTo(4.5, 0); ctx.lineTo(-2.5, -2.2); ctx.lineTo(-2.5, 2.2); ctx.closePath();
+      ctx.fillStyle = flat ? 'white' : '#e5e7eb'; ctx.fill();
+      if (!flat) {
+        ctx.beginPath(); ctx.moveTo(4.5, 0); ctx.lineTo(1.5, -0.95); ctx.lineTo(1.5, 0.95); ctx.closePath();
+        ctx.fillStyle = '#4fc3f7'; ctx.fill();
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath(); ctx.moveTo(-2.5, -2.2); ctx.lineTo(-3.6, -3.3); ctx.lineTo(-1.4, -1.9); ctx.closePath(); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(-2.5, 2.2); ctx.lineTo(-3.6, 3.3); ctx.lineTo(-1.4, 1.9); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#1e3a8a'; ctx.beginPath(); ctx.arc(0.5, 0, 0.7, 0, Math.PI * 2); ctx.fill();
+      }
+      if (boosting) {
+        const len = 8 + Math.random() * 3;
+        ctx.beginPath(); ctx.moveTo(-2.5, -1.8); ctx.lineTo(-len, 0); ctx.lineTo(-2.5, 1.8); ctx.closePath();
+        ctx.fillStyle = 'rgba(96,165,250,0.9)'; ctx.fill();
+        ctx.beginPath(); ctx.moveTo(-2.5, -0.9); ctx.lineTo(-len * 0.6, 0); ctx.lineTo(-2.5, 0.9); ctx.closePath();
+        ctx.fillStyle = 'white'; ctx.fill();
+      } else if (thrusting) {
+        const len = 5 + Math.random() * 2;
+        ctx.beginPath(); ctx.moveTo(-2.5, -1.2); ctx.lineTo(-len, 0); ctx.lineTo(-2.5, 1.2); ctx.closePath();
+        ctx.fillStyle = '#fb923c'; ctx.fill();
+        ctx.beginPath(); ctx.moveTo(-2.5, -0.6); ctx.lineTo(-len * 0.6, 0); ctx.lineTo(-2.5, 0.6); ctx.closePath();
+        ctx.fillStyle = '#fde68a'; ctx.fill();
+      }
     }
 
     function drawRocket() {
-        ctx.save();
-        ctx.translate(rocket.x, rocket.y);
-        // Rotate so the rocket points in the direction it's facing
-        ctx.rotate(rocket.rotation - Math.PI/2); // Adjust by -90° so that a rotation of 0 faces right
-        
-        // Draw rocket with point facing right (which will be rotated to match the thrust direction)
-        ctx.beginPath();
-        ctx.moveTo(4, 0);    // Nose of rocket (now pointing right)
-        ctx.lineTo(-2, -2);  // Top left corner
-        ctx.lineTo(-2, 2);   // Bottom left corner
-        ctx.closePath();
-        ctx.fillStyle = 'white';
-        ctx.fill();
+      if (rocket.dead) return;
+      if (rocket.invuln > 0 && rocket.invuln % 16 < 8) ctx.globalAlpha = 0.4;
+      ctx.save();
+      ctx.translate(rocket.x, rocket.y);
+      ctx.rotate(rocket.rotation - Math.PI / 2);
+      drawRocketShape(rocket.thrusting, rocket.boosting, false);
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
 
-        // Draw a bigger flame while boosting
-        if (keys[' '] && rocket.boosters > 0) {
-          ctx.beginPath();
-          ctx.moveTo(-2, -1.8);  // Top of rocket back
-          ctx.lineTo(-8, 0);   // Flame tip (smaller)
-          ctx.lineTo(-2, 1.8);   // Bottom of rocket back
-          ctx.closePath();
-          ctx.fillStyle = 'blue';
-          ctx.fill();
+    // ---------- Rendering: screen space ----------
+    function drawPopups() {
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      for (const p of popups) {
+        const s = worldToScreen(p.x, p.y);
+        ctx.globalAlpha = clamp(p.life / 30, 0, 1);
+        ctx.fillStyle = p.color;
+        ctx.font = `bold ${p.size}px SpaceFont, Arial`;
+        ctx.fillText(p.text, s.x, s.y - 14 - (p.maxLife - p.life) * 0.4);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawTargetArrow() {
+      const target = findTarget();
+      if (!target || rocket.dead) return;
+      const s = worldToScreen(target.x, target.y);
+      const margin = 48;
+      if (s.x > margin && s.x < W - margin && s.y > margin && s.y < H - margin) return;
+      const cx = W / 2, cy = H / 2, dx = s.x - cx, dy = s.y - cy;
+      const ang = Math.atan2(dy, dx);
+      const k = Math.min((W / 2 - margin) / Math.max(Math.abs(dx), 1e-6), (H / 2 - margin) / Math.max(Math.abs(dy), 1e-6));
+      const ax = cx + dx * k, ay = cy + dy * k;
+      ctx.save(); ctx.translate(ax, ay); ctx.rotate(ang);
+      ctx.fillStyle = target.color;
+      ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -9); ctx.lineTo(-4, 0); ctx.lineTo(-8, 9); ctx.closePath(); ctx.fill();
+      ctx.restore();
+      const dist = Math.hypot(target.x - rocket.x, target.y - rocket.y);
+      ctx.fillStyle = 'white'; ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(`${target.name.toUpperCase()} ${Math.round(dist)}`, ax - Math.cos(ang) * 40, ay - Math.sin(ang) * 40);
+    }
+
+    // ---------- Console: on-screen buttons with their hotkeys ----------
+    const buttons = [
+      { id: 'boost', label: 'BOOSTER', key: 'SPACE', color: '#4ade80',
+        press() { ui.boost = true; }, release() { ui.boost = false; },
+        active: () => rocket.boosting, enabled: () => rocket.fuel > 0 },
+      { id: 'nav', label: 'NAV AI', key: 'N', color: '#4fc3f7',
+        press() { toggleNav(); }, release() {},
+        active: () => game.nav && rocket.battery > 0, enabled: () => game.nav || rocket.battery >= NAV_MIN_CHARGE },
+      { id: 'charge', label: 'RECHARGE', key: 'R', color: '#facc15',
+        press() { ui.charge = true; }, release() { ui.charge = false; },
+        active: () => rocket.charging, enabled: () => rocket.fuel > 0 && rocket.battery < BATTERY_MAX },
+    ];
+    for (const b of buttons) Object.assign(b, { x: 0, y: 0, w: 0, h: 0, visible: false });
+    const BUTTON_W = 160, BUTTON_H = 44, BUTTON_GAP = 14;
+
+    function layoutButtons() {   // centred along the bottom; battery controls only appear on battery levels
+      const show = game.level && game.level.battery ? buttons : buttons.slice(0, 1);
+      const total = show.length * BUTTON_W + (show.length - 1) * BUTTON_GAP;
+      let x = Math.round(W / 2 - total / 2);
+      for (const b of buttons) b.visible = false;
+      for (const b of show) { b.x = x; b.y = H - 16 - BUTTON_H; b.w = BUTTON_W; b.h = BUTTON_H; b.visible = true; x += BUTTON_W + BUTTON_GAP; }
+    }
+    function hit(b, x, y) { return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
+    function buttonAt(x, y) {
+      for (const b of buttons) if (b.visible && hit(b, x, y)) return b;
+      return null;
+    }
+    const introButton = { id: 'launch', label: 'LAUNCH', key: 'SPACE', color: '#4fc3f7', x: 0, y: 0, w: 190, h: 48,
+                          press() { beginPlay(); }, release() {}, active: () => false, enabled: () => true };
+    const mapButtons = [
+      { id: 'go', label: 'LAUNCH', key: 'ENTER', color: '#4fc3f7', x: 0, y: 0, w: 190, h: 48,
+        press() { launchSelected(); }, release() {}, active: () => false, enabled: () => !map.travel },
+      { id: 'back', label: 'BACK', key: 'ESC', color: '#cbd5e1', x: 0, y: 0, w: 130, h: 40,
+        press() { leaveMap(); }, release() {}, active: () => false, enabled: () => true },
+    ];
+    function mapButtonAt(x, y) { return mapButtons.find(b => hit(b, x, y)) || null; }
+    function roundRectPath(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+    }
+    function drawButton(b) {
+      const active = b.active(), enabled = b.enabled();
+      ctx.save();
+      ctx.globalAlpha *= enabled ? 1 : 0.4;
+      roundRectPath(b.x, b.y, b.w, b.h, 8);
+      ctx.fillStyle = active ? rgba(b.color, 0.5) : rgba(b.color, hoverButton === b ? 0.28 : 0.12);
+      ctx.fill();
+      ctx.lineWidth = active ? 2 : 1.5; ctx.strokeStyle = active ? '#ffffff' : b.color; ctx.stroke();
+      ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+      ctx.fillStyle = active ? '#ffffff' : b.color; ctx.font = 'bold 15px SpaceFont, Arial';
+      ctx.fillText(b.label, b.x + 12, b.y + b.h / 2 + 1);
+      // the hotkey, drawn as a keycap inside the button
+      ctx.font = 'bold 11px monospace';
+      const kw = ctx.measureText(b.key).width + 14, kh = 22, kx = b.x + b.w - 10 - kw, ky = b.y + (b.h - kh) / 2;
+      roundRectPath(kx, ky, kw, kh, 4);
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fill();
+      ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.stroke();
+      ctx.fillStyle = 'white'; ctx.textAlign = 'center';
+      ctx.fillText(b.key, kx + kw / 2, ky + kh / 2 + 1);
+      ctx.restore();
+    }
+    function drawSunIcon(x, y, strength) {
+      ctx.save();
+      ctx.globalAlpha = 0.3 + 0.7 * strength; ctx.strokeStyle = '#fde047'; ctx.fillStyle = '#fde047'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath();
+      for (let i = 0; i < 8; i++) {
+        const a = i * Math.PI / 4;
+        ctx.moveTo(x + Math.cos(a) * 4, y + Math.sin(a) * 4); ctx.lineTo(x + Math.cos(a) * 6, y + Math.sin(a) * 6);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+    function drawConsole() {
+      layoutButtons();
+      ctx.textBaseline = 'top';
+      for (const b of buttons) {
+        if (!b.visible) continue;
+        const gy = b.y - 32;   // gauge row above the button
+        ctx.font = '12px monospace'; ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        if (b.id === 'boost') {
+          ctx.fillText(`FUEL ${Math.floor(rocket.fuel)}`, b.x, gy);
+          bar(b.x, gy + 18, b.w, 6, rocket.fuel / 500, rocket.fuel > 0 ? '#4ade80' : '#ef4444');
+        } else if (b.id === 'nav') {
+          ctx.fillText(`BATTERY ${Math.round(rocket.battery)}%`, b.x, gy);
+          const rate = powerRate(), txt = `${rate >= 0 ? '+' : ''}${rate.toFixed(Math.abs(rate) >= 10 ? 0 : 1)}/s`;
+          ctx.textAlign = 'right'; ctx.fillStyle = rate >= 0 ? '#4ade80' : '#f87171';
+          ctx.fillText(txt, b.x + b.w, gy);
+          drawSunIcon(b.x + b.w - ctx.measureText(txt).width - 12, gy + 6, clamp(solarRate() / NAV_DRAIN, 0, 1));
+          const low = rocket.battery < 20;
+          bar(b.x, gy + 18, b.w, 6, rocket.battery / BATTERY_MAX, low && game.ticks % 30 < 15 ? '#ff5252' : low ? '#f87171' : '#4fc3f7');
+        } else if (b.id === 'charge') {
+          ctx.fillStyle = 'rgba(255,255,255,0.5)';
+          ctx.fillText(`HOLD: ${CHARGE_FUEL_COST} FUEL \u2192 1% CHARGE`, b.x, gy);
         }
-        
-        // Draw a small flame when thrusting
-        if (keys['ArrowUp']) {
-          ctx.beginPath();
-          ctx.moveTo(-2, -1);  // Top of rocket back
-          ctx.lineTo(-6, 0);   // Flame tip (smaller)
-          ctx.lineTo(-2, 1);   // Bottom of rocket back
-          ctx.closePath();
-          ctx.fillStyle = 'orange';
-          ctx.fill();
-        }
-        
+        drawButton(b);
+      }
+      if (game.level.noNav) {
+        const b = buttons[0];
+        ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.font = 'bold 13px monospace';
+        ctx.fillStyle = game.ticks % 40 < 28 ? '#ff5252' : 'rgba(255,82,82,0.4)';
+        ctx.fillText('NAV AI OFFLINE', b.x + b.w + 18, b.y + b.h / 2);
+      }
+    }
+
+    function bar(x, y, w, h, frac, color) {
+      ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(x, y, w, h);
+      ctx.fillStyle = color; ctx.fillRect(x, y, w * clamp(frac, 0, 1), h);
+    }
+
+    function drawHUD() {
+      const L = game.level;
+      ctx.save();
+      ctx.textBaseline = 'top';
+      // Level and objective
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#4fc3f7'; ctx.font = 'bold 18px SpaceFont, Arial';
+      ctx.fillText(`LEVEL ${game.levelIndex + 1}  ·  ${L.name}`, 16, 14);
+      ctx.fillStyle = 'white'; ctx.font = '14px monospace';
+      ctx.fillText(goalText(), 16, 40);
+      bar(16, 62, 220, 6, goalProgress(), '#facc15');
+      // Timer
+      ctx.textAlign = 'center';
+      const low = game.timeLeft <= 15 && game.state === GAME_STATE.PLAYING;
+      ctx.fillStyle = low ? (game.ticks % 30 < 15 ? '#ff5252' : '#ffb4b4') : 'white';
+      ctx.font = 'bold 30px monospace';
+      ctx.fillText(formatTime(game.timeLeft), W / 2, 12);
+      // Score, lives, boost, heat
+      ctx.textAlign = 'right';
+      ctx.fillStyle = 'white'; ctx.font = 'bold 22px monospace';
+      ctx.fillText(`${game.score}`, W - 16, 12);
+      ctx.font = '12px monospace'; ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.fillText(`BEST ${highScore}`, W - 16, 38);
+      for (let i = 0; i < game.lives; i++) {
+        ctx.save(); ctx.translate(W - 22 - i * 18, 66); ctx.rotate(-Math.PI / 2); ctx.scale(2, 2);
+        drawRocketShape(false, false, true);
         ctx.restore();
       }
-
-    // Draw collectibles within world space
-    function drawCollectibles() {
-      ctx.save();
-      for (const b of boosters) {
-        ctx.fillStyle = BOOSTER_COLOR;
-        ctx.beginPath();
-        ctx.arc(b.x, b.y, COLLECTIBLE_RADIUS, 0, Math.PI * 2);
-        ctx.fill();
+      if (rocket.heat > 0) {
+        ctx.fillStyle = '#f87171'; ctx.font = '12px monospace'; ctx.fillText('HULL HEAT', W - 16, 82);
+        bar(W - 16 - 140, 98, 140, 8, rocket.heat, rocket.heat > 0.7 && game.ticks % 20 < 10 ? '#ffffff' : '#f87171');
       }
-      for (const m of materials) {
-        ctx.fillStyle = MATERIAL_COLOR;
-        ctx.beginPath();
-        ctx.arc(m.x, m.y, COLLECTIBLE_RADIUS, 0, Math.PI * 2);
-        ctx.fill();
+      // Combo
+      if (game.combo > 1 && game.comboTimer > 0) {
+        ctx.textAlign = 'center';
+        ctx.globalAlpha = clamp(game.comboTimer / 60, 0, 1);
+        ctx.fillStyle = '#facc15'; ctx.font = 'bold 26px SpaceFont, Arial';
+        ctx.fillText(`x${game.combo} COMBO`, W / 2, 56);
+        ctx.globalAlpha = 1;
+      }
+      // Hint (centred above the console) and controls
+      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+      if (game.state === GAME_STATE.PLAYING && game.ticks < 900 && L.hint) {
+        ctx.globalAlpha = clamp((900 - game.ticks) / 120, 0, 1);
+        ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.font = '14px monospace';
+        ctx.fillText(L.hint, W / 2, H - 112);
+        ctx.globalAlpha = 1;
+      }
+      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace';
+      ctx.fillText(`M  music ${OrbitalAudio.isMuted() ? 'off' : 'on'}  ·  F  follow ${camera.follow ? 'on' : 'off'}  ·  X  abandon`, 16, 78);
+      drawConsole();
+      ctx.restore();
+    }
+
+    function drawMinimap() {
+      const size = 150, pad = 16, cx = W - pad - size / 2, cy = H - pad - size / 2;
+      let range = 0;
+      for (const p of planets) range = Math.max(range, p.distance);
+      for (const A of levelBelts(game.level)) range = Math.max(range, A.outer);
+      range = Math.max(range, Math.hypot(rocket.x, rocket.y)) * 1.12;
+      const k = (size / 2) / range;
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.strokeStyle = 'rgba(79,195,247,0.4)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(cx, cy, size / 2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.arc(cx, cy, size / 2, 0, Math.PI * 2); ctx.clip();
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      for (const p of planets) { ctx.beginPath(); ctx.arc(cx, cy, p.distance * k, 0, Math.PI * 2); ctx.stroke(); }
+      ctx.fillStyle = 'rgba(160,160,160,0.7)';
+      for (const a of asteroids) ctx.fillRect(cx + a.x * k, cy + a.y * k, 1.2, 1.2);
+      ctx.fillStyle = '#fde047'; ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fill();
+      const target = findTarget();
+      for (const p of planets) {
+        ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(cx + p.x * k, cy + p.y * k, 3, 0, Math.PI * 2); ctx.fill();
+        if (p === target) {
+          ctx.strokeStyle = rgba(p.color, 0.5 + 0.5 * Math.sin(game.ticks * 0.15));
+          ctx.beginPath(); ctx.arc(cx + p.x * k, cy + p.y * k, 6, 0, Math.PI * 2); ctx.stroke();
+        }
+      }
+      if (!rocket.dead) {
+        ctx.fillStyle = 'white'; ctx.beginPath(); ctx.arc(cx + rocket.x * k, cy + rocket.y * k, 2, 0, Math.PI * 2); ctx.fill();
       }
       ctx.restore();
     }
 
-    // HUD drawing (screen space)
-    function drawHUD() {
+    function overlay(alpha) { ctx.fillStyle = `rgba(0,0,0,${alpha})`; ctx.fillRect(0, 0, W, H); }
+    function pulseText(text, x, y) {
+      ctx.fillStyle = `rgba(79,195,247,${0.6 + 0.4 * Math.sin(game.ticks * 0.1)})`;
+      ctx.font = 'bold 18px SpaceFont, Arial';
+      ctx.fillText(text, x, y);
+    }
+
+    function drawLevelIntro() {
+      const L = game.level, a = clamp(game.stateTimer / 20, 0, 1);
+      overlay(0.55 * a);
+      ctx.globalAlpha = a; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '20px SpaceFont, Arial';
+      ctx.fillText(`LEVEL ${game.levelIndex + 1} OF ${LEVELS.length}`, W / 2, H / 2 - 120);
+      ctx.fillStyle = '#4fc3f7'; ctx.font = 'bold 60px SpaceFont, Arial';
+      ctx.fillText(L.name, W / 2, H / 2 - 60);
+      ctx.fillStyle = 'white'; ctx.font = '20px monospace';
+      ctx.fillText(L.brief, W / 2, H / 2 + 10);
+      ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '15px monospace';
+      ctx.fillText(L.hint, W / 2, H / 2 + 45);
+      ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '14px monospace';
+      ctx.fillText(`TIME LIMIT ${formatTime(L.time)}   ·   LIVES ${game.lives}`, W / 2, H / 2 + 80);
+      let y = H / 2 + 140;
+      if (L.notes) {   // new mechanics introduced on this level
+        ctx.fillStyle = '#facc15'; ctx.font = '14px monospace';
+        L.notes.forEach((line, i) => ctx.fillText(line, W / 2, H / 2 + 112 + i * 20));
+        y += L.notes.length * 20 + 4;
+      }
+      introButton.x = W / 2 - introButton.w / 2; introButton.y = y - introButton.h / 2;
+      drawButton(introButton);
+      ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('ESC  star map', W / 2, y + 44);
+      ctx.globalAlpha = 1;
+    }
+
+    function drawLevelComplete() {
+      const s = game.stats, a = clamp(game.stateTimer / 20, 0, 1);
+      overlay(0.6 * a);
+      ctx.globalAlpha = a; ctx.textBaseline = 'middle';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#4ade80'; ctx.font = 'bold 60px SpaceFont, Arial';
+      ctx.fillText('LEVEL COMPLETE', W / 2, H / 2 - 110);
+      ctx.font = '18px monospace';
+      const rows = [
+        ['ORE COLLECTED', `${s.ore}`],
+        [`TIME BONUS  (${formatTime(s.timeLeft)} left)`, `+${s.timeBonus}`],
+        ['LEVEL BONUS', `+${s.levelBonus}`],
+        ['EXTRA LIFE', '+1'],
+        ['SCORE', `${game.score}`],
+      ];
+      rows.forEach(([k, v], i) => {
+        const y = H / 2 - 40 + i * 28;
+        ctx.textAlign = 'right'; ctx.fillStyle = 'white'; ctx.fillText(k, W / 2 - 10, y);
+        ctx.textAlign = 'left'; ctx.fillStyle = i === rows.length - 1 ? '#facc15' : 'white'; ctx.fillText(v, W / 2 + 10, y);
+      });
+      ctx.textAlign = 'center';
+      if (game.stateTimer > 45) pulseText(game.levelIndex + 1 < LEVELS.length ? 'PRESS SPACE TO FLY ON' : 'PRESS SPACE', W / 2, H / 2 + 130);
+      ctx.globalAlpha = 1;
+    }
+
+    function drawGameOver() {
+      const a = clamp(game.stateTimer / 30, 0, 1);
+      overlay(0.7 * a);
+      ctx.globalAlpha = a; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ff5252'; ctx.font = 'bold 64px SpaceFont, Arial';
+      ctx.fillText('GAME OVER', W / 2, H / 2 - 100);
+      ctx.fillStyle = 'white'; ctx.font = '20px monospace';
+      ctx.fillText(game.gameOverReason.toUpperCase(), W / 2, H / 2 - 40);
+      ctx.font = '18px monospace';
+      ctx.fillText(`REACHED LEVEL ${game.levelIndex + 1}   ·   SCORE ${game.score}`, W / 2, H / 2 + 10);
+      if (game.score > 0 && game.score >= highScore) { ctx.fillStyle = '#facc15'; ctx.fillText('NEW HIGH SCORE!', W / 2, H / 2 + 45); }
+      else { ctx.fillStyle = '#4fc3f7'; ctx.fillText(`HIGH SCORE ${highScore}`, W / 2, H / 2 + 45); }
+      if (game.stateTimer > 90) pulseText('PRESS SPACE', W / 2, H / 2 + 120);
+      ctx.globalAlpha = 1;
+    }
+
+    function drawWin() {
+      const a = clamp(game.stateTimer / 30, 0, 1);
+      overlay(0.7 * a);
+      ctx.globalAlpha = a; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#facc15'; ctx.font = 'bold 60px SpaceFont, Arial';
+      ctx.fillText('GALAXY CONQUERED', W / 2, H / 2 - 100);
+      ctx.fillStyle = 'white'; ctx.font = '20px monospace';
+      ctx.fillText(`YOU CLEARED ALL ${LEVELS.length} STAR SYSTEMS`, W / 2, H / 2 - 40);
+      ctx.fillText(`FINAL SCORE ${game.score}`, W / 2, H / 2 + 10);
+      ctx.fillStyle = '#4fc3f7';
+      ctx.fillText(game.score >= highScore ? 'NEW HIGH SCORE!' : `HIGH SCORE ${highScore}`, W / 2, H / 2 + 45);
+      if (game.stateTimer > 90) pulseText('PRESS SPACE', W / 2, H / 2 + 120);
+      ctx.globalAlpha = 1;
+    }
+
+    function drawWelcome() {
+      const t = game.ticks, cx = W / 2, cy = H / 2;
+      drawStars(0, 0, t);
+      // Planet horizon
+      const pr = W * 0.75, px = cx, py = H + pr * 0.82;
+      let g = ctx.createRadialGradient(px, py, pr * 0.95, px, py, pr * 1.12);
+      g.addColorStop(0, 'rgba(79,195,247,0.35)'); g.addColorStop(1, 'rgba(79,195,247,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, pr * 1.12, 0, Math.PI * 2); ctx.fill();
+      g = ctx.createRadialGradient(px - pr * 0.3, py - pr * 0.9, pr * 0.1, px, py, pr);
+      g.addColorStop(0, '#60a5fa'); g.addColorStop(0.5, '#1d4ed8'); g.addColorStop(1, '#0b1a3a');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
+      // A rocket circling the title
+      welcome.rocketAngle += 0.006;
+      const ex = 280, ey = 75, oy = cy - 100;
+      ctx.strokeStyle = 'rgba(79,195,247,0.35)'; ctx.lineWidth = 1.5; ctx.beginPath();
+      for (let k = 0; k < 50; k++) {
+        const a = welcome.rocketAngle - k * 0.02;
+        const x = cx + Math.cos(a) * ex, y = oy + Math.sin(a) * ey;
+        k ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      }
+      ctx.stroke();
       ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0); // Screen space
-      ctx.fillStyle = 'white';
-      ctx.font = '16px monospace';
-      ctx.textAlign = 'right';
-      ctx.fillText(`Ore: ${score}`, canvas.width - 10, 20);
-      ctx.fillText(`Fuel: ${Math.floor(rocket.boosters)}`, canvas.width - 10, 40);
+      ctx.translate(cx + Math.cos(welcome.rocketAngle) * ex, oy + Math.sin(welcome.rocketAngle) * ey);
+      ctx.rotate(Math.atan2(Math.cos(welcome.rocketAngle) * ey, -Math.sin(welcome.rocketAngle) * ex));
+      ctx.scale(3, 3);
+      drawRocketShape(true, false, false);
+      ctx.restore();
+      // Title
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.shadowColor = '#4fc3f7'; ctx.shadowBlur = 30;
+      ctx.fillStyle = '#4fc3f7'; ctx.font = 'bold 80px SpaceFont, Arial';
+      ctx.fillText('ORBITAL', cx, cy - 100);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '18px SpaceFont, Arial';
+      ctx.fillText('A GAME OF GRAVITY', cx, cy - 45);
+      ctx.fillStyle = 'white'; ctx.font = '20px monospace';
+      ctx.fillText(`HIGH SCORE  ${highScore}`, cx, cy + 5);
+      if (game.score > 0) {
+        ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '14px monospace';
+        ctx.fillText(`LAST RUN  ${game.score}`, cx, cy + 30);
+      }
+      ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.font = '14px monospace';
+      ctx.fillText('ARROWS / WASD  steer & thrust     SPACE  booster     F  camera follow     M  music     X  abandon run', cx, H - 48);
+      ctx.fillText(`${LEVELS.length} STAR SYSTEMS   ·   SOUND ${OrbitalAudio.isMuted() ? 'OFF' : 'ON'}`, cx, H - 26);
+      startButton.style.display = 'block';
+    }
+
+    function drawMap() {
+      const t = game.ticks;
+      drawStars(t * 0.15, 0, t);
+      ctx.save();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#4fc3f7'; ctx.font = 'bold 34px SpaceFont, Arial';
+      ctx.fillText('STAR MAP', W / 2, 44);
+      ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '14px monospace';
+      ctx.fillText(`${Math.min(cleared, LEVELS.length)} OF ${LEVELS.length} SYSTEMS CLEARED`, W / 2, 72);
+      if (game.inRun) {
+        ctx.textAlign = 'right'; ctx.fillStyle = 'white'; ctx.font = 'bold 22px monospace';
+        ctx.fillText(`${game.score}`, W - 16, 24);
+        ctx.font = '12px monospace'; ctx.fillStyle = 'rgba(255,255,255,0.6)';
+        ctx.fillText(`LIVES ${game.lives}   ·   FUEL ${Math.floor(rocket.fuel)}`, W - 16, 48);
+      }
+      // the route
+      ctx.setLineDash([4, 6]); ctx.lineWidth = 1.5;
+      for (let i = 0; i + 1 < LEVELS.length; i++) {
+        const a = mapStarPos(i), b = mapStarPos(i + 1);
+        ctx.strokeStyle = i < maxLevelReached ? 'rgba(79,195,247,0.55)' : 'rgba(255,255,255,0.12)';
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      // the systems
+      ctx.textAlign = 'center';
+      for (let i = 0; i < LEVELS.length; i++) {
+        const L = LEVELS[i], st = mapStarStyle(i), p = mapStarPos(i);
+        const unlocked = i <= maxLevelReached, done = i < cleared;
+        const r = 5 + st.radius / 8, color = unlocked ? st.color : '#475569';
+        if (unlocked) {
+          const g = ctx.createRadialGradient(p.x, p.y, r * 0.5, p.x, p.y, r * 3.5);
+          g.addColorStop(0, rgba(st.color, 0.5)); g.addColorStop(1, rgba(st.color, 0));
+          ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r * 3.5, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.globalAlpha = unlocked ? 1 : 0.5;
+        const g2 = ctx.createRadialGradient(p.x - r * 0.3, p.y - r * 0.3, r * 0.1, p.x, p.y, r);
+        g2.addColorStop(0, unlocked ? '#ffffff' : '#94a3b8'); g2.addColorStop(0.6, color); g2.addColorStop(1, shade(color, 0.6));
+        ctx.fillStyle = g2; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
+        if (done) { ctx.strokeStyle = 'rgba(74,222,128,0.8)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(p.x, p.y, r + 5, 0, Math.PI * 2); ctx.stroke(); }
+        if (i === map.selected && !map.travel) {
+          ctx.strokeStyle = '#4fc3f7'; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(p.x, p.y, r + 10 + 2 * Math.sin(t * 0.1), 0, Math.PI * 2); ctx.stroke();
+        } else if (i === map.hover) {
+          ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.arc(p.x, p.y, r + 10, 0, Math.PI * 2); ctx.stroke();
+        }
+        ctx.font = '10px monospace'; ctx.fillStyle = 'rgba(255,255,255,0.5)';
+        ctx.fillText(`${i + 1}`, p.x, p.y - r - 12);
+        ctx.font = unlocked ? 'bold 11px SpaceFont, Arial' : '11px SpaceFont, Arial';
+        ctx.fillStyle = unlocked ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.35)';
+        ctx.fillText(L.name, p.x, p.y + r + 14);
+        ctx.globalAlpha = 1;
+      }
+      // the rocket, parked at a system or flying between two
+      let rx, ry, ang, thrusting = false;
+      if (map.travel) {
+        const k = smoothstep(map.travel.t), p = travelPos(map.travel, k), q = travelPos(map.travel, Math.min(1, k + 0.01));
+        rx = p.x; ry = p.y; ang = Math.atan2(q.y - p.y, q.x - p.x); thrusting = true;
+      } else {
+        const p = mapStarPos(map.rocketAt), nxt = mapStarPos(Math.min(map.rocketAt + 1, LEVELS.length - 1));
+        rx = p.x; ry = p.y - 26 + 2 * Math.sin(t * 0.05); ang = Math.atan2(nxt.y - p.y, nxt.x - p.x);
+      }
+      drawParticles();
+      ctx.save(); ctx.translate(rx, ry); ctx.rotate(ang); ctx.scale(2.5, 2.5); drawRocketShape(thrusting, false, false); ctx.restore();
+      // the chosen system
+      const sel = LEVELS[map.selected], sst = mapStarStyle(map.selected);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = sst.color; ctx.font = 'bold 26px SpaceFont, Arial';
+      ctx.fillText(map.travel ? `EN ROUTE TO ${LEVELS[map.travel.to].name}` : sel.name, W / 2, H - 172);
+      ctx.fillStyle = 'white'; ctx.font = '15px monospace';
+      ctx.fillText(sel.brief, W / 2, H - 144);
+      const status = map.selected < cleared ? 'CLEARED' : map.selected === maxLevelReached ? 'NEXT' : 'UNLOCKED';
+      const tags = [status, `${sel.planets.length} PLANET${sel.planets.length > 1 ? 'S' : ''}`, `TIME ${formatTime(sel.time)}`];
+      if (levelBelts(sel).length) tags.push('ASTEROIDS');
+      if (sel.battery) tags.push('BATTERY');
+      if (sel.noNav) tags.push('NO NAV AI');
+      ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.font = '13px monospace';
+      ctx.fillText(tags.join('   ·   '), W / 2, H - 120);
+      // buttons
+      const go = mapButtons[0], back = mapButtons[1];
+      go.x = W / 2 - go.w / 2; go.y = H - 84;
+      back.x = 16; back.y = H - 56; back.label = game.inRun ? 'QUIT RUN' : 'BACK';
+      drawButton(go); drawButton(back);
+      ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('ARROWS  choose a system     ENTER  launch     click a star to select it, click again to go', W / 2, H - 18);
       ctx.restore();
     }
 
-    // Calculate gravitational force between two bodies
-    // with special handling for rocket-planet interactions
-    function calculateGravity(body1, body2) {
-      const dx = body2.x - body1.x;
-      const dy = body2.y - body1.y;
-      const distSq = dx * dx + dy * dy;
-
-      if(body2.radius  && distSq < body2.radius*body2.radius){
-        rocket.vx *= 0.9999;
-        rocket.vy *= 0.9999;
-        return { fx: 0, fy: 0, distSq };
+    // ---------- Main loop ----------
+    function tick() {
+      game.ticks++; game.stateTimer++;
+      updateParticles(); updatePopups();
+      if (camera.shake > 0) { camera.shake *= 0.88; if (camera.shake < 0.3) camera.shake = 0; }
+      const S = game.state;
+      if (S === GAME_STATE.WELCOME) return;
+      if (S === GAME_STATE.MAP) { updateTravel(); return; }
+      if (S === GAME_STATE.LEVEL_INTRO) {   // the world turns while the player reads; nothing launches until they do
+        stepWorld(); computePrediction(); updateCamera();
+        return;
       }
-            
-      // Force magnitude (Newton's law of universal gravitation)
-      const force = G * body1.mass * body2.mass / distSq;
-
-      if(force < 5){
-        return { fx: 0, fy: 0, distSq };  
+      if (S === GAME_STATE.PLAYING) {
+        handleInput(); updatePower();
+        stepWorld();
+        if (!rocket.dead) { checkCollisions(); collectItems(); }
+        if (game.state === GAME_STATE.PLAYING) { updateTimer(); updateCombo(); handleRespawn(); }
+        computePrediction(); updateCamera(); syncEngineAudio();
+        return;
       }
-
-      const dist = Math.sqrt(distSq);
-
-      // Force components
-      const fx = force * dx / dist;
-      const fy = force * dy / dist;
-      
-      return { fx, fy, distSq };
+      stepWorld(); computePrediction(); updateCamera();   // level complete / game over / win: the world keeps drifting
     }
 
-    function applyAcceleration(forceX, forceY, body,  dt){
-      // Apply acceleration (F = ma, so a = F/m)
-      const ax = forceX / body.mass;
-      const ay = forceY / body.mass;
-      
-      // Update velocity based on acceleration
-      body.vx += ax * dt;
-      body.vy += ay * dt;
-      
-      // Update position
-      body.x += body.vx * dt;
-      body.y += body.vy * dt;
-    }
-    
-    // Apply gravitational forces and update positions
-    function updatePhysics(dt) {
+    function render() {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = '#02030a'; ctx.fillRect(0, 0, W, H);
+      if (game.state === GAME_STATE.MAP) { drawMap(); return; }
+      if (game.state === GAME_STATE.WELCOME || !game.level) { drawWelcome(); return; }
 
-      closestPlanet = null;
-      closestDistanceSQ = Infinity;
-      
-      // Calculate rocket physics - rocket experiences gravity but doesn't affect planets
-      let rocketFx = 0;
-      let rocketFy = 0;
-      
-      const { fx: sunFx, fy: sunFy } = calculateGravity(rocket, sun);
-      rocketFx += sunFx;
-      rocketFy += sunFy;
+      drawStars(-camera.offsetX / camera.scale, -camera.offsetY / camera.scale, game.ticks);
+      const sx = camera.shake ? (Math.random() - 0.5) * camera.shake : 0;
+      const sy = camera.shake ? (Math.random() - 0.5) * camera.shake : 0;
+      ctx.setTransform(camera.scale, 0, 0, camera.scale, W / 2 + camera.offsetX + sx, H / 2 + camera.offsetY + sy);
+      drawOrbitRings();
+      drawSun();
+      drawAsteroids();
+      for (const p of planets) drawPlanet(p);
+      drawCollectibles();
+      drawTrail();
+      drawPrediction();
+      drawParticles();
+      drawRocket();
 
-      for (let i = 0; i < planets.length; i++) {
-        const planet = planets[i];
-
-        const { fx, fy } = calculateGravity(planet, sun);
-
-        applyAcceleration(fx, fy, planet, dt);
-      
-        const { fx: rfx, fy: rfy, distSq } = calculateGravity(rocket, planet);
-        rocketFx += rfx;
-        rocketFy += rfy;
-
-        if (distSq < closestDistanceSQ) {
-          closestDistanceSQ = distSq;
-          closestPlanet = planet;
-        }
-      }
-            
-      applyAcceleration(rocketFx, rocketFy, rocket, dt);
-      
-    }
-    
-    function updateCameraPosition() {
-      // Constants used for both planet and rocket following
-      const baseThreshold = 4000; // Start adjusting at this distance
-      const veryCloseThreshold = 500; // Perfect centering below this
-      
-      // Determine which object to follow and set target position
-      let targetObject;
-      let distanceSQ;
-      
-      if (closestPlanet && closestDistanceSQ <= baseThreshold) {
-        // Follow the closest planet when close enough
-        targetObject = closestPlanet;
-        distanceSQ = closestDistanceSQ;
-      } else {
-        // Follow the rocket when no planet is close enough
-        targetObject = rocket;
-        // For the rocket, we'll measure the distance between current camera focus and where it should be
-        const cameraDeltaX = (-rocket.x * scale) - offsetX;
-        const cameraDeltaY = (-rocket.y * scale) - offsetY;
-        distanceSQ = cameraDeltaX * cameraDeltaX + cameraDeltaY * cameraDeltaY;
-      }
-      
-      // Set target offset based on the object we're following
-      targetOffsetX = -targetObject.x * scale;
-      targetOffsetY = -targetObject.y * scale;
-      
-      // Apply the appropriate camera movement based on distance
-      if (distanceSQ <= veryCloseThreshold) {
-        // When extremely close, snap precisely to target position
-        offsetX = targetOffsetX;
-        offsetY = targetOffsetY;
-      } else {
-        // Adaptive smoothness - increases as distance decreases
-        // Map distance from [veryCloseThreshold, baseThreshold] to [1.0, cameraSmoothness]
-        const distanceRatio = Math.min(1, (distanceSQ - veryCloseThreshold) / (baseThreshold - veryCloseThreshold));
-        const adaptiveSmoothness = cameraSmoothness + (1 - cameraSmoothness) * (1 - distanceRatio);
-        
-        // Apply the adaptive smoothing
-        offsetX += (targetOffsetX - offsetX) * adaptiveSmoothness;
-        offsetY += (targetOffsetY - offsetY) * adaptiveSmoothness;
-      }
-    }
-    
-    // Update collectible positions and handle collisions
-    function updateCollectibles(dt) {
-      
-
-      const updateGroup = (group, onCollect) => {
-        for (let i = group.length - 1; i >= 0; i--) {
-          const item = group[i];
-          const angularSpeed = item.distance * 0.05 * dt;  // radians per update (scaled)
-          item.angle += angularSpeed;
-          item.x = item.planet.x + Math.cos(item.angle) * item.distance;
-          item.y = item.planet.y + Math.sin(item.angle) * item.distance;
-
-          // Collision with rocket (simple distance check)
-          const dx = item.x - rocket.x;
-          const dy = item.y - rocket.y;
-          if (dx * dx + dy * dy < 16) {
-            onCollect(); // trigger reward
-            group.splice(i, 1); // remove item
-          }
-        }
-      };
-
-      // Booster collection
-      updateGroup(boosters, () => {
-        rocket.boosters+=100;
-      });
-
-      // Material collection
-      updateGroup(materials, () => {
-        score += 10;
-      });
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      drawPopups();
+      drawTargetArrow();
+      drawHUD();
+      drawMinimap();
+      if (game.state === GAME_STATE.LEVEL_INTRO) drawLevelIntro();
+      else if (game.state === GAME_STATE.LEVEL_COMPLETE) drawLevelComplete();
+      else if (game.state === GAME_STATE.GAME_OVER) drawGameOver();
+      else if (game.state === GAME_STATE.WIN) drawWin();
     }
 
-    
-    function update() {
-      
-      if (currentGameState === GAME_STATE.WELCOME) {
-        drawWelcomeScreen();
-      } else if (currentGameState === GAME_STATE.PLAYING) {
-        gameFrame();
-      } else if (currentGameState === GAME_STATE.GAME_OVER) {
-        drawGameOverScreen();
-      }
-
-      requestAnimationFrame(update);
+    let lastTime = 0, acc = 0;
+    function loop(now) {
+      if (!lastTime) lastTime = now;
+      acc += Math.min(250, now - lastTime);
+      lastTime = now;
+      while (acc >= TICK_MS) { tick(); acc -= TICK_MS; }
+      render();
+      requestAnimationFrame(loop);
     }
 
-
+    makeStars();
     addListeners();
-    
-    requestAnimationFrame(update);
+    const devLevel = parseInt(new URLSearchParams(location.search).get('level'));
+    if (devLevel >= 1 && devLevel <= LEVELS.length) { newGame(devLevel - 1); beginPlay(); }
+    requestAnimationFrame(loop);
   </script>
 </body>
 </html>
