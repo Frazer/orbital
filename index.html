@@ -85,7 +85,7 @@
     // ---------- Levels ----------
     // goal.type 'ore'   : collect goal.count ore anywhere
     // goal.type 'visit' : collect at least one ore at every planet
-    // goal.type 'race'  : finish with more ore than the rival ship (level.rival), which mines the same belts
+    // goal.type 'race'  : finish with more ore than the rival ships (level.rival or level.rivals), which mine the same belts
     const LEVELS = [
       { name: 'FIRST ORBIT', theme: 'calm',
         brief: 'Collect 10 ore from orbit around Terra.',
@@ -323,7 +323,7 @@
     ];
 
     // ---------- State ----------
-    const GAME_STATE = { WELCOME: 'welcome', MAP: 'map', LEVEL_INTRO: 'intro', PLAYING: 'playing', LEVEL_COMPLETE: 'complete', GAME_OVER: 'gameover', WIN: 'win' };
+    const GAME_STATE = { WELCOME: 'welcome', MAP: 'map', LEVEL_INTRO: 'intro', PLAYING: 'playing', LEVEL_COMPLETE: 'complete', GAME_OVER: 'gameover', WIN: 'win', CUSTOM: 'custom' };
 
     const sun = Object.assign({ x: 0, y: 0, name: 'Sol', alwaysPulls: true }, DEFAULT_STAR);   // never cut off, so a rocket shares its planet's frame
     const planets = [];
@@ -350,15 +350,27 @@
       dead: false, respawnTimer: 0, heat: 0, invuln: 0,
       thrusting: false, boosting: false,
     };
-    // The rival prospector on race levels: a second ship with the same physics, flown by the game.
-    const rival = {
-      active: false, name: 'RIVAL', color: '#f472b6',
-      x: 0, y: 0, vx: 0, vy: 0, rotation: 0, rotationSpeed: 0.05, mass: 20, thrustPower: 0.06, boostPower: 0.5,
-      fuel: 0, ore: 0, dead: false, respawnTimer: 0, heat: 0, thrusting: false, boosting: false, crashes: 0, lastOreTick: -999,
-      ctl: { left: false, right: false, up: false, boost: false },   // what its pilot is pressing
-      trail: [], trailFrame: null, nearest: null, nearestSQ: Infinity,
-      ai: null,
-    };
+    // Rival prospectors on race levels: ships with the same physics as the rocket, each flown by the game's pilot.
+    // The pilot's functions all work on `rival`, the ship whose turn it is; tick() points it at each ship in turn.
+    const rivals = [];
+    let rival = null;
+    const RIVAL_LOOKS = [   // colour and paint for the first, second and third rival
+      { color: '#f472b6', pal: { body: '#fbcfe8', nose: '#f472b6', fin: '#9d174d' } },
+      { color: '#fb923c', pal: { body: '#fed7aa', nose: '#fb923c', fin: '#9a3412' } },
+      { color: '#a78bfa', pal: { body: '#ddd6fe', nose: '#a78bfa', fin: '#5b21b6' } },
+    ];
+    function rivalName(i, count) { return count > 1 ? `RIVAL ${i + 1}` : 'RIVAL'; }
+    function makeRival(index) {
+      const look = RIVAL_LOOKS[index % RIVAL_LOOKS.length];
+      return {
+        index, name: 'RIVAL', color: look.color, pal: look.pal, cfg: null,
+        x: 0, y: 0, vx: 0, vy: 0, rotation: 0, rotationSpeed: 0.05, mass: 20, thrustPower: 0.06, boostPower: 0.5,
+        fuel: 0, ore: 0, dead: false, respawnTimer: 0, heat: 0, thrusting: false, boosting: false, crashes: 0, lastOreTick: -999,
+        ctl: { left: false, right: false, up: false, boost: false },   // what its pilot is pressing
+        trail: [], trailFrame: null, nearest: null, nearestSQ: Infinity,
+        ai: null,
+      };
+    }
 
     const game = {
       state: GAME_STATE.WELCOME, levelIndex: 0, level: null,
@@ -418,14 +430,15 @@
 
     function buildLevel(def) {
       planets.length = 0; ores.length = 0; fuels.length = 0; asteroids.length = 0;
-      particles.length = 0; rings.length = 0; popups.length = 0; trail.length = 0; rival.trail.length = 0;
+      particles.length = 0; rings.length = 0; popups.length = 0; trail.length = 0; rivals.length = 0; rival = null;
       Object.assign(sun, DEFAULT_STAR, def.star || {});
       def.planets.forEach((d, i) => {
         const mass = calculateMass(d.radius);
         const a = d.startAngle === undefined ? i * 1.7 : d.startAngle;
         const v = orbitalVelocity(sun.mass, d.distance) * (d.retro ? -1 : 1);   // retrograde worlds orbit the other way
         const p = {
-          name: d.name, radius: d.radius, color: d.color, mass, home: !!d.home, rivalHome: !!d.rivalHome, distance: d.distance, retro: !!d.retro,
+          name: d.name, radius: d.radius, color: d.color, mass, home: !!d.home, distance: d.distance, retro: !!d.retro,
+          rivalHome: d.rivalHome === true ? 0 : typeof d.rivalHome === 'number' ? d.rivalHome : -1,   // which rival starts here
           x: Math.cos(a) * d.distance, y: Math.sin(a) * d.distance,
           vx: -Math.sin(a) * v, vy: Math.cos(a) * v,
           soi: soiRadius(mass), oreTotal: d.ore, collected: 0,
@@ -512,10 +525,11 @@
         gravityAt(rocket.x, rocket.y, rocket.mass, gravBodies, tmpForce);
         integrate(rocket, tmpForce, dt);
       }
-      if (rival.active && !rival.dead) {
-        gravityAt(rival.x, rival.y, rival.mass, gravBodies, tmpForce);
-        integrate(rival, tmpForce, dt);
-        nearestBody(rival);
+      for (const r of rivals) {
+        if (r.dead) continue;
+        gravityAt(r.x, r.y, r.mass, gravBodies, tmpForce);
+        integrate(r, tmpForce, dt);
+        nearestBody(r);
       }
       closestPlanet = null; closestDistanceSQ = Infinity;
       for (const b of gravBodies) {
@@ -523,7 +537,7 @@
         if (d2 < closestDistanceSQ) { closestDistanceSQ = d2; closestPlanet = b; }
       }
       if (!rocket.dead && game.ticks % 2 === 0) recordTrail();
-      if (rival.active && !rival.dead && game.ticks % 2 === 0) rival.trailFrame = recordTrailInto(rival, rival.trail, rival.trailFrame, dominantBodyOf(rival));
+      if (game.ticks % 2 === 0) for (const r of rivals) if (!r.dead) r.trailFrame = recordTrailInto(r, r.trail, r.trailFrame, dominantBodyOf(r));
       moveCollectibles(dt);
       if (rocket.invuln > 0) rocket.invuln--;
     }
@@ -649,27 +663,37 @@
       }
     }
 
-    // ---------- The rival ----------
-    // On race levels a second ship mines the same belts. It obeys the same physics and controls as the player's
-    // rocket; its pilot (further down) presses the same four controls.
+    // ---------- The rivals ----------
+    // On race levels other ships mine the same belts. They obey the same physics and controls as the player's
+    // rocket; their pilot (further down) presses the same four controls. A level lists them in `rivals` (or a
+    // single one in `rival`); each entry sets a handicap: thrust, turn and boost multipliers, a pause after every
+    // capture and a linger after every pickup, in ticks.
     const RIVAL_RESPAWN = 240;            // ticks out of action after a crash
     const RIVAL_BUDGET = 1200;            // ticks it works one world before moving on even if ore remains
-    const RIVAL_PLAN_MS = 2.5, RIVAL_SIMS_PER_TICK = 40;   // planning budget per tick: whichever runs out first
-    const RIVAL_PALETTE = { body: '#fbcfe8', nose: '#f472b6', fin: '#9d174d' };
+    const RIVAL_PLAN_MS = 3.5, RIVAL_SIMS_PER_TICK = 40;   // planning budget per tick, shared between the rivals: whichever runs out first
+    let rivalPlanSpent = 0;               // planning time used so far this tick, by all rivals
 
-    function setupRival(L) {
-      rival.active = !!L.rival;
-      rival.ore = 0; rival.crashes = 0; rival.lastOreTick = -999; rival.dead = false;
-      if (!rival.active) return;
-      const R = L.rival;
-      rival.name = R.name || 'RIVAL'; rival.color = R.color || '#f472b6';
-      rival.thrustPower = rocket.thrustPower * (R.thrust || 1);
-      rival.boostPower = rocket.boostPower * (R.boost || 1);
-      rival.rotationSpeed = rocket.rotationSpeed * (R.turn || 1);
-      rival.fuel = L.startFuel || START_FUEL;
-      spawnRival();
+    function levelRivals(L) { return L.rivals || (L.rival ? [L.rival] : []); }
+    function setupRivals(L) {
+      rivals.length = 0; rival = null;
+      const cfgs = levelRivals(L);
+      cfgs.forEach((R, i) => {
+        const r = makeRival(i);
+        r.name = R.name || rivalName(i, cfgs.length);
+        if (R.color) r.color = R.color;
+        r.cfg = R;
+        r.thrustPower = rocket.thrustPower * (R.thrust || 1);
+        r.boostPower = rocket.boostPower * (R.boost || 1);
+        r.rotationSpeed = rocket.rotationSpeed * (R.turn || 1);
+        r.fuel = L.startFuel || START_FUEL;
+        rivals.push(r);
+        rival = r; spawnRival();
+      });
+      rival = rivals[0] || null;
     }
-    function rivalHome() { return planets.find(p => p.rivalHome) || planets[planets.length - 1]; }
+    function rivalHome() {   // its own home world; failing that, the worlds counted in from the far end
+      return planets.find(p => p.rivalHome === rival.index) || planets[Math.max(0, planets.length - 1 - rival.index)];
+    }
     // Into a circular orbit around its home world, on the far side from where a player would spawn, going the same way round.
     function spawnRival() {
       const home = rivalHome(), d = home.radius + 12, v = orbitalVelocity(home.mass, d);
@@ -722,7 +746,7 @@
         if (dx * dx + dy * dy < COLLECT_RADIUS_SQ) {
           ores.splice(i, 1);
           rival.ore++; rival.lastOreTick = game.ticks;
-          rival.ai.pause = Math.max(rival.ai.pause, game.level.rival.linger || 0);   // it savours each find for a moment
+          rival.ai.pause = Math.max(rival.ai.pause, rival.cfg.linger || 0);   // it savours each find for a moment
           popup(o.x, o.y, `${rival.name} +1`, rival.color, 12);
           sparkle(o.x, o.y, rival.color);
           if (raceCheck()) return;
@@ -739,7 +763,7 @@
       }
     }
     function rivalRespawn() {
-      if (!rival.active || !rival.dead) return;
+      if (!rival.dead) return;
       if (--rival.respawnTimer > 0) return;
       spawnRival();
       rival.fuel = Math.max(rival.fuel, START_FUEL);
@@ -870,21 +894,33 @@
       const ai = rival.ai, spare = rival.fuel - 15, cands = [];
       const boost = [48, 100].filter(n => n <= spare);
       const pw = boost.length ? rival.boostPower : rival.thrustPower;
-      const ns = boost.length ? boost : [160, 320];   // no booster fuel: long main-engine burns
-      for (let wait = 60; wait <= 420; wait += 30) for (let a = 0; a < RIVAL_DIRS; a++) for (const n of ns) cands.push([wait, a, n]);
-      ai.search = { dest, cands, i: 0, best: null, pw, S: snapshotWorld(), t0: ai.playT };
+      let ns = boost.length ? boost : [160, 320];   // no booster fuel: long main-engine burns
+      const dist = Math.hypot(dest.x - rival.x, dest.y - rival.y), far = dist > 333;   // far worlds need a longer look ahead, and a wider miss will do
+      if (far) ns = ns.slice(-1);   // a long transfer: the big burn only, and launch windows spread over a longer stretch, since each simulation costs more
+      const w0 = far ? 90 : 60, w1 = far ? 900 : 420, dw = far ? 90 : 30;
+      for (let wait = w0; wait <= w1; wait += dw) for (let a = 0; a < RIVAL_DIRS; a++) for (const n of ns) cands.push([wait, a, n]);
+      ai.search = { dest, cands, i: 0, best: null, near: null, refined: false, pw, S: snapshotWorld(), t0: ai.playT,
+                    maxT: clamp(Math.round(dist * 6), 2000, 4500), accept: Math.max(120, dist * 0.3) };
     }
     function rivalSearchStep() {   // evaluates candidates for a slice of a tick; true once the whole search is done
       const ai = rival.ai, S = ai.search, A = S.dest.radius + 22, start = performance.now();
       for (let k = 0; k < RIVAL_SIMS_PER_TICK && S.i < S.cands.length; k++, S.i++) {
-        if (k > 0 && performance.now() - start > RIVAL_PLAN_MS) break;   // out of time for this tick; carry on next tick
+        const spent = rivalPlanSpent + performance.now() - start;   // the first rival to plan each tick always gets one simulation in
+        if (spent > RIVAL_PLAN_MS && (k > 0 || rivalPlanSpent > 0)) break;   // out of time for this tick; carry on next tick
         const [wait, a, n] = S.cands[S.i], ang = a / RIVAL_DIRS * Math.PI * 2, bx = Math.cos(ang), by = Math.sin(ang);
         const turn = Math.abs(normAngle(Math.atan2(bx, -by) - rival.rotation)) / rival.rotationSpeed;   // ticks to face the burn
         if (wait - (ai.playT - S.t0) < turn + 15) continue;                                           // too soon to be ready for it
-        const r = rivalSim(S.S, wait, bx, by, n, S.pw, 2000, S.dest, ai.planet);
-        if (r.crash !== undefined || r.dmin > 120 || r.dmin < S.dest.radius + 10) continue;   // a rough fly-by will do: it is corrected en route            // a usable fly-by, not a graze
+        const r = rivalSim(S.S, wait, bx, by, n, S.pw, S.maxT, S.dest, ai.planet);
+        if (r.crash !== undefined || r.dmin < S.dest.radius + 10) continue;                                // a crash, or a graze
+        if (!S.near || r.dmin < S.near.dmin) S.near = { wait, a, n, dmin: r.dmin };                       // the nearest miss, for refining
+        if (r.dmin > S.accept) continue;                                                                   // a rough fly-by will do: it is corrected en route
         const cost = Math.abs(r.dmin - A) * 1.0 + (wait + r.tmin) / 60 * 2.5 + n * S.pw * 0.16 + Math.max(0, r.vrel - 35) * 0.6;   // gentle arrivals save capture fuel
         if (!S.best || cost < S.best.cost) S.best = { wait, a, bx, by, n, pw: S.pw, dmin: r.dmin, tmin: r.tmin, vrel: r.vrel, cost, turn };
+      }
+      rivalPlanSpent += performance.now() - start;
+      if (S.i >= S.cands.length && !S.refined) {   // the coarse grid is done: look between its headings around the nearest miss
+        S.refined = true;
+        if (S.near && !S.best) for (const dw of [-15, 0, 15]) for (const da of [-0.5, -0.25, 0.25, 0.5]) S.cands.push([S.near.wait + dw, S.near.a + da, S.near.n]);
       }
       return S.i >= S.cands.length;
     }
@@ -893,13 +929,11 @@
       const S = snapshotWorld(), A = d.radius + 22, n = 16;
       const base = rivalSim(S, 0, 0, 0, 0, 0, 1500, d);
       if (base.crash !== undefined || base.dmin <= A + 12) return;
-      const vx = rival.vx - d.vx, vy = rival.vy - d.vy, v = Math.hypot(vx, vy) || 1, px = -vy / v, py = vx / v;
-      let best = null;
-      for (const sgn of [1, -1]) {
-        const r = rivalSim(S, 0, px * sgn, py * sgn, n, rival.boostPower, 1500, d);
-        if (r.crash === undefined && r.dmin < base.dmin - 5 && (!best || r.dmin < best.dmin)) best = { bx: px * sgn, by: py * sgn, n, dmin: r.dmin };
-      }
-      if (best) rival.ai.corr = best;
+      const vx = rival.vx - d.vx, vy = rival.vy - d.vy, v = Math.hypot(vx, vy) || 1;
+      const sgn = (d.x - rival.x) * -vy + (d.y - rival.y) * vx >= 0 ? 1 : -1;   // across the path, towards the side the world is on
+      const px = -vy / v * sgn, py = vx / v * sgn;
+      const r = rivalSim(S, 0, px, py, n, rival.boostPower, 1500, d);
+      if (r.crash === undefined && r.dmin < base.dmin - 5) rival.ai.corr = { bx: px, by: py, n, dmin: r.dmin };
     }
     function rivalThink() {
       const ai = rival.ai, c = rival.ctl;
@@ -964,7 +998,7 @@
           if (ai.t % 45 === 20 && dist > 150 && rival.fuel > 40) rivalGuide(d);
         }
         if (dist < Math.max(60, (d.radius + 28) * 2)) { ai.planet = d; ai.dest = null; ai.phase = 'arrive'; ai.R = d.radius + 12; ai.visits++; ai.t = 0; ai.corr = null; }
-        else if (++ai.t > 2400) {   // missed: settle at whatever is nearest
+        else if (++ai.t > Math.max(2400, ai.plan.tmin * 1.5)) {   // missed: settle at whatever is nearest
           let q = planets[0], qd = Infinity;
           for (const z of planets) { const e = Math.hypot(z.x - rival.x, z.y - rival.y); if (e < qd) { qd = e; q = z; } }
           ai.planet = q; ai.dest = null; ai.phase = 'arrive'; ai.R = q.radius + 12; ai.t = 0; ai.corr = null;
@@ -974,7 +1008,7 @@
       if (ai.phase === 'arrive') {
         const mag = rivalHold(p, ai.R, 8);
         if ((mag < 4 && Math.abs(ai.r - ai.R) < 6) || ++ai.t > 1800) {
-          ai.phase = 'sweep'; ai.target = null; ai.arrivedT = ai.playT; ai.pause = game.level.rival.pause || 0;
+          ai.phase = 'sweep'; ai.target = null; ai.arrivedT = ai.playT; ai.pause = rival.cfg.pause || 0;
         }
         return;
       }
@@ -1108,8 +1142,8 @@
       startLevel(levelIdx);
     }
 
-    function startLevel(idx) {
-      const L = LEVELS[idx];
+    function startLevel(idx) {   // idx -1 is the custom system
+      const L = idx >= 0 ? LEVELS[idx] : custom.level;
       game.levelIndex = idx; game.level = L;
       game.ore = 0; game.timeLeft = L.time; game.lastSec = -1; game.hot = false;
       game.combo = 0; game.comboTimer = 0; game.ticks = 0; game.stateTimer = 0; game.deathReason = '';
@@ -1117,7 +1151,7 @@
       buildLevel(L);
       spawnRocket();
       rocket.fuel = Math.max(rocket.fuel, L.startFuel || START_FUEL);
-      setupRival(L);
+      setupRivals(L);
       game.raceTotal = ores.length;
       const home = homePlanet();
       camera.follow = true; camera.zoomMul = 1; camera.scale = L.nearZoom || NEAR_ZOOM; camera.shake = 0;
@@ -1151,21 +1185,23 @@
     function goalText() {
       const g = game.level.goal;
       if (g.type === 'ore') return `ORE  ${game.ore} / ${g.count}`;
-      if (g.type === 'race') return `YOU  ${game.ore}     ${rival.name}  ${rival.ore}     ·   ${ores.length} LEFT`;
+      if (g.type === 'race') return `YOU  ${game.ore}     ${rivals.map(r => `${r.name}  ${r.ore}`).join('     ')}     ·   ${ores.length} LEFT`;
       return planets.map(p => (p.collected > 0 ? '✓ ' : '○ ') + p.name.toUpperCase()).join('   ');
     }
     // Race levels end as soon as the outcome is settled. True when this call ended the level.
+    function leadingRival() { let best = null; for (const r of rivals) if (!best || r.ore > best.ore) best = r; return best; }
     function raceCheck() {
       if (game.level.goal.type !== 'race' || game.state !== GAME_STATE.PLAYING) return false;
-      const total = game.raceTotal;
+      const total = game.raceTotal, lead = leadingRival();
       if (game.ore * 2 > total) { completeLevel(); return true; }
-      if (rival.ore * 2 > total) { endGame('Out-mined by the rival'); return true; }
+      if (lead && lead.ore * 2 > total) { endGame(`Out-mined by ${lead.name}`); return true; }
       if (ores.length === 0) { raceFinish(); return true; }
       return false;
     }
-    function raceFinish() {   // no ore left, or time up: whoever holds more wins; a tie goes to the rival
-      if (game.ore > rival.ore) completeLevel();
-      else endGame(game.ore === rival.ore ? 'Tied with the rival' : 'Out-mined by the rival');
+    function raceFinish() {   // no ore left, or time up: whoever holds most wins; a tie goes to the rival
+      const lead = leadingRival();
+      if (!lead || game.ore > lead.ore) completeLevel();
+      else endGame(game.ore === lead.ore ? `Tied with ${lead.name}` : `Out-mined by ${lead.name}`);
     }
     function oresLeft(p) { let n = 0; for (const o of ores) if (o.planet === p) n++; return n; }
     function findTarget() {
@@ -1182,14 +1218,16 @@
 
     function completeLevel() {
       const timeBonus = Math.floor(game.timeLeft) * TIME_BONUS_PER_SECOND;
-      game.stats = { ore: game.ore, timeLeft: game.timeLeft, timeBonus, levelBonus: LEVEL_BONUS, rivalOre: rival.active ? rival.ore : undefined };
+      game.stats = { ore: game.ore, timeLeft: game.timeLeft, timeBonus, levelBonus: LEVEL_BONUS, rivalOres: rivals.map(r => ({ name: r.name, ore: r.ore })) };
       game.score += timeBonus + LEVEL_BONUS;
       game.lives = Math.min(MAX_LIVES, game.lives + 1);
       updateHighScore();
-      maxLevelReached = Math.max(maxLevelReached, Math.min(game.levelIndex + 1, LEVELS.length - 1));
-      localStorage.setItem('orbitalMaxLevel', maxLevelReached);
-      cleared = Math.max(cleared, game.levelIndex + 1);
-      localStorage.setItem('orbitalCleared', cleared);
+      if (game.levelIndex >= 0) {   // custom systems do not count towards the campaign
+        maxLevelReached = Math.max(maxLevelReached, Math.min(game.levelIndex + 1, LEVELS.length - 1));
+        localStorage.setItem('orbitalMaxLevel', maxLevelReached);
+        cleared = Math.max(cleared, game.levelIndex + 1);
+        localStorage.setItem('orbitalCleared', cleared);
+      }
       game.state = GAME_STATE.LEVEL_COMPLETE; game.stateTimer = 0;
       rocket.thrusting = false; rocket.boosting = false;
       for (let i = 0; i < 6; i++) sparkle(rocket.x + (Math.random() - 0.5) * 20, rocket.y + (Math.random() - 0.5) * 20, ['#facc15', '#4ade80', '#4fc3f7'][i % 3]);
@@ -1199,7 +1237,8 @@
     }
 
     function nextLevel() {
-      if (game.levelIndex + 1 < LEVELS.length) openMap(game.levelIndex + 1, game.levelIndex);   // fly on to the next system
+      if (game.levelIndex < 0) openCustom();   // back to the builder, to tweak the system or fly it again
+      else if (game.levelIndex + 1 < LEVELS.length) openMap(game.levelIndex + 1, game.levelIndex);   // fly on to the next system
       else winGame();
     }
 
@@ -1290,7 +1329,122 @@
       }
     }
 
+    // ---------- Custom systems ----------
+    // The player picks a planet count, how spread out the system is, how many rivals fly and how good they are.
+    // A system is generated from those choices and a seed, then played like any other level (index -1).
+    const CUSTOM_SIZES = [   // gap: typical spacing between orbits; perPlanet: seconds of time limit each world adds
+      { label: 'COMPACT', gap: 65,  zoom: 1.5, theme: 'storm', perPlanet: 25, star: { radius: 22, color: '#fbbf24', mass: 700000, luminosity: 1.2, heatRadius: 55 } },
+      { label: 'CLOSE',   gap: 100, zoom: 1.6, theme: 'drive', perPlanet: 30, star: { radius: 24, color: '#fbbf24', mass: 800000, luminosity: 1.1, heatRadius: 70 } },
+      { label: 'ROOMY',   gap: 160, zoom: 2.2, theme: 'epic',  perPlanet: 40, star: {} },
+      { label: 'WIDE',    gap: 260, zoom: 3,   theme: 'deep',  perPlanet: 50, star: {} },
+      { label: 'VAST',    gap: 420, zoom: 0,   theme: 'deep',  perPlanet: 60, star: { radius: 28, color: '#fef3c7', mass: 1100000, luminosity: 0.8, heatRadius: 130 } },
+    ];
+    const CUSTOM_SKILLS = [   // rival handicaps, from a dawdling old ship to a match for yours
+      { label: 'ROOKIE',  thrust: 0.6,  turn: 0.6,  pause: 600, linger: 300 },
+      { label: 'CRUISER', thrust: 0.75, turn: 0.75, pause: 360, linger: 180 },   // the BONANZA rival
+      { label: 'VETERAN', thrust: 0.9,  turn: 0.9,  pause: 180, linger: 60 },
+      { label: 'ACE',     thrust: 1,    turn: 1,    pause: 0,   linger: 0 },
+    ];
+    const CUSTOM_ROWS = [
+      { key: 'planets', label: 'PLANETS',     min: 2, max: 12,                        text: v => `${v}` },
+      { key: 'size',    label: 'SYSTEM SIZE', min: 0, max: CUSTOM_SIZES.length - 1,   text: v => CUSTOM_SIZES[v].label },
+      { key: 'rivals',  label: 'RIVALS',      min: 0, max: RIVAL_LOOKS.length,        text: v => v === 0 ? 'NONE' : `${v}` },
+      { key: 'skill',   label: 'RIVAL SKILL', min: 0, max: CUSTOM_SKILLS.length - 1,  text: v => CUSTOM_SKILLS[v].label },
+    ];
+    const CUSTOM_STARS = ['Kestrel', 'Vesper', 'Halcyon', 'Lantern', 'Orrery', 'Tamsin', 'Beacon', 'Mirage', 'Solace', 'Tallow', 'Wren', 'Cobalt'];
+    const CUSTOM_WORLDS = ['Ash', 'Brine', 'Cinder', 'Dusk', 'Ember', 'Fen', 'Gale', 'Haze', 'Iron', 'Jade', 'Knoll', 'Loam',
+                           'Moss', 'Nickel', 'Ochre', 'Pyre', 'Quill', 'Rime', 'Slate', 'Tarn', 'Umber', 'Vale', 'Wisp', 'Zinc'];
+    const CUSTOM_COLORS = ['#d4d4d8', '#a8a29e', '#4ade80', '#fb923c', '#94a3b8', '#fde047', '#f87171', '#e0e7ff',
+                           '#c084fc', '#a5f3fc', '#f59e0b', '#e879f9', '#818cf8', '#2dd4bf', '#fca5a5', '#bef264'];
+    const custom = { row: 0, planets: 6, size: 1, rivals: 1, skill: 1, seed: 1, level: null, rows: [], hit: [] };
+    CUSTOM_ROWS.forEach((row, i) => {   // clickable arrows either side of each value, and the row itself
+      custom.rows.push({ x: 0, y: 0, w: 0, h: 0, row: i, press() { custom.row = i; }, release() {} });
+      for (const delta of [-1, 1]) custom.hit.push({ x: 0, y: 0, w: 0, h: 0, row: i, delta, press() { custom.row = i; customChange(delta); }, release() {} });
+    });
+    const customButtons = [
+      { id: 'go', label: 'LAUNCH', key: 'ENTER', color: '#4fc3f7', x: 0, y: 0, w: 190, h: 48,
+        press() { launchCustom(); }, release() {}, active: () => false, enabled: () => true },
+      { id: 'back', label: 'STAR MAP', key: 'ESC', color: '#cbd5e1', x: 0, y: 0, w: 150, h: 40,
+        press() { openMap(maxLevelReached); }, release() {}, active: () => false, enabled: () => true },
+      { id: 'shuffle', label: 'SHUFFLE', key: 'R', color: '#facc15', x: 0, y: 0, w: 150, h: 40,
+        press() { customShuffle(); }, release() {}, active: () => false, enabled: () => true },
+    ];
+    function customButtonAt(x, y) { return customButtons.find(b => hit(b, x, y)) || custom.hit.find(b => hit(b, x, y)) || custom.rows.find(b => hit(b, x, y)) || null; }
+    function seededRandom(seed) {   // mulberry32: the same seed always builds the same system
+      let a = seed >>> 0;
+      return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    }
+    function makeCustomLevel(c) {
+      const rnd = seededRandom(c.seed * 1000003 + c.planets * 7919 + c.size * 131);
+      const take = list => list.splice(Math.floor(rnd() * list.length), 1)[0];
+      const size = CUSTOM_SIZES[c.size], skill = CUSTOM_SKILLS[c.skill];
+      const n = c.planets, k = Math.min(c.rivals, n - 1);
+      const star = Object.assign({ name: take(CUSTOM_STARS.slice()) }, size.star), S = Object.assign({}, DEFAULT_STAR, star);
+      const names = CUSTOM_WORLDS.slice(), colors = CUSTOM_COLORS.slice();
+      const home = Math.min(n - 1, Math.round((n - 1) / 3));   // your world sits a third of the way out
+      const others = [];   // rival homes: the worlds farthest from yours, kept apart from each other where possible
+      for (let i = 0; i < n; i++) if (i !== home) others.push(i);
+      others.sort((a, b) => Math.abs(b - home) - Math.abs(a - home));
+      const rivalHomes = [];
+      for (const i of others) if (rivalHomes.length < k && rivalHomes.every(j => Math.abs(j - i) >= 2)) rivalHomes.push(i);
+      for (const i of others) if (rivalHomes.length < k && !rivalHomes.includes(i)) rivalHomes.push(i);
+      const planets = [];
+      let d = S.heatRadius * 2, total = 0;
+      for (let i = 0; i < n; i++) {
+        if (i > 0) d += size.gap * (0.85 + rnd() * 0.3);
+        const isHome = i === home, rh = rivalHomes.indexOf(i);
+        const radius = isHome || rh >= 0 ? 8 : [4, 5, 5, 6, 6, 7, 7, 8, 9, 10][Math.floor(rnd() * 10)];
+        const ore = radius >= 8 ? 6 : radius >= 6 ? 5 : radius >= 5 ? 4 : 3;
+        const fuel = isHome || rh >= 0 ? 8 : 3 + (radius >= 7 ? 1 : 0) + (rnd() < 0.5 ? 1 : 0);
+        total += ore;
+        planets.push({ name: take(names), radius, distance: Math.round(d), color: isHome ? '#3b82f6' : take(colors),
+                       home: isHome, rivalHome: rh >= 0 ? rh : undefined, ore, fuel, startAngle: +((i * 2.4 + rnd() * 0.8) % (Math.PI * 2)).toFixed(2) });
+      }
+      const goal = k ? { type: 'race' } : { type: 'ore', count: Math.max(5, Math.ceil(total * 0.6)) };
+      const time = clamp(Math.round((120 + n * size.perPlanet) / 30) * 30, 180, 900);
+      return {
+        name: star.name.toUpperCase(), theme: size.theme, battery: true, nearZoom: size.zoom || undefined, custom: true, star,
+        rivals: Array.from({ length: k }, () => ({ thrust: skill.thrust, turn: skill.turn, pause: skill.pause, linger: skill.linger })),
+        brief: k ? `${n} worlds and ${k} rival prospector${k > 1 ? 's' : ''}. Finish with more ore than ${k > 1 ? 'any of them' : 'it'}.`
+                 : `${n} worlds around ${star.name}. Collect ${goal.count} of their ${total} ore.`,
+        hint: k > 1 ? 'The rival ships mine the same belts. Every ore they take is one you cannot.'
+            : k ? 'The pink ship mines the same belts. Every ore it takes is one you cannot.'
+            : 'Every world pulls on you. Short burns go a long way.',
+        notes: k ? [`RIVAL SKILL: ${skill.label}. Hold more than half the ore to win outright, or lead when time runs out.`] : undefined,
+        goal, time, planets, oreTotal: total, skill: skill.label,
+      };
+    }
+    function openCustom() {
+      game.state = GAME_STATE.CUSTOM; game.stateTimer = 0; game.level = null; game.inRun = false;
+      particles.length = 0; rings.length = 0; popups.length = 0;
+      hoverButton = null; pressedButton = null;
+      startButton.style.display = 'none';
+      custom.level = makeCustomLevel(custom);
+      OrbitalAudio.startMusic('ambient');
+    }
+    function customRow(delta) { custom.row = clamp(custom.row + delta, 0, CUSTOM_ROWS.length - 1); OrbitalAudio.sfx.select(); }
+    function customChange(delta) {
+      const row = CUSTOM_ROWS[custom.row], v = clamp(custom[row.key] + delta, row.min, row.max);
+      if (v === custom[row.key]) return;
+      custom[row.key] = v; custom.level = makeCustomLevel(custom);
+      OrbitalAudio.sfx.select();
+    }
+    function customShuffle() { custom.seed = Math.floor(Math.random() * 1e6) + 1; custom.level = makeCustomLevel(custom); OrbitalAudio.sfx.select(); }
+    function launchCustom() {
+      try { localStorage.setItem('orbitalCustom', JSON.stringify({ planets: custom.planets, size: custom.size, rivals: custom.rivals, skill: custom.skill, seed: custom.seed })); } catch (e) {}
+      newGame(-1);
+    }
+    function loadCustom() {
+      try {
+        const saved = JSON.parse(localStorage.getItem('orbitalCustom'));
+        if (!saved) return;
+        for (const row of CUSTOM_ROWS) if (typeof saved[row.key] === 'number') custom[row.key] = clamp(Math.round(saved[row.key]), row.min, row.max);
+        if (saved.seed > 0) custom.seed = saved.seed;
+      } catch (e) {}
+    }
+
     function updateHighScore() {
+      if (game.levelIndex < 0) return;   // custom systems keep their scores to themselves
       if (game.score > highScore) {
         highScore = game.score;
         localStorage.setItem('orbitalHighScore', highScore);
@@ -1420,6 +1574,11 @@
           if (i === map.selected) launchSelected(); else selectStar(i);   // a second click on the chosen star launches
           return true;
         }
+        if (S === GAME_STATE.CUSTOM) {
+          const b = customButtonAt(x, y);
+          if (b) b.press();
+          return !!b;
+        }
         if (S === GAME_STATE.LEVEL_INTRO) {
           if (hit(introButton, x, y) || buttonAt(x, y)) { beginPlay(); return true; }
           return false;
@@ -1433,7 +1592,7 @@
       function releasePress() { if (pressedButton) { pressedButton.release(); pressedButton = null; } }
       canvas.addEventListener('mousedown', e => {
         unlockAudio();
-        if (pressAt(e.clientX, e.clientY) || game.state === GAME_STATE.MAP) return;
+        if (pressAt(e.clientX, e.clientY) || game.state === GAME_STATE.MAP || game.state === GAME_STATE.CUSTOM) return;
         isDragging = true; lastX = e.clientX; lastY = e.clientY;
       });
       canvas.addEventListener('mousemove', e => {
@@ -1441,9 +1600,10 @@
           const S = game.state, x = e.clientX, y = e.clientY;
           hoverButton = S === GAME_STATE.PLAYING ? buttonAt(x, y)
                       : S === GAME_STATE.MAP ? mapButtonAt(x, y)
+                      : S === GAME_STATE.CUSTOM ? customButtonAt(x, y)
                       : S === GAME_STATE.LEVEL_INTRO && hit(introButton, x, y) ? introButton : null;
           map.hover = S === GAME_STATE.MAP ? mapStarAt(x, y) : -1;
-          canvas.style.cursor = hoverButton || map.hover >= 0 ? 'pointer' : S === GAME_STATE.MAP ? 'default' : 'grab';
+          canvas.style.cursor = hoverButton || map.hover >= 0 ? 'pointer' : S === GAME_STATE.MAP || S === GAME_STATE.CUSTOM ? 'default' : 'grab';
           return;
         }
         const mx = e.clientX - lastX, my = e.clientY - lastY;
@@ -1478,10 +1638,19 @@
           else if (confirm) launchSelected();
           else if (['ArrowLeft', 'ArrowUp', 'a', 'A', 'w', 'W'].includes(k)) selectStar(map.selected - 1);
           else if (['ArrowRight', 'ArrowDown', 'd', 'D', 's', 'S'].includes(k)) selectStar(map.selected + 1);
+          else if (k === 'c' || k === 'C') openCustom();
           else if (k === 'Escape') leaveMap();
+        } else if (S === GAME_STATE.CUSTOM) {
+          if (confirm) launchCustom();
+          else if (['ArrowUp', 'w', 'W'].includes(k)) customRow(-1);
+          else if (['ArrowDown', 's', 'S'].includes(k)) customRow(1);
+          else if (['ArrowLeft', 'a', 'A'].includes(k)) customChange(-1);
+          else if (['ArrowRight', 'd', 'D'].includes(k)) customChange(1);
+          else if (k === 'r' || k === 'R') customShuffle();
+          else if (k === 'Escape') openMap(maxLevelReached);
         } else if (S === GAME_STATE.LEVEL_INTRO) {   // only a deliberate launch starts the clock
           if (confirm) beginPlay();
-          else if (k === 'Escape') openMap(game.levelIndex);
+          else if (k === 'Escape') { if (game.levelIndex < 0) openCustom(); else openMap(game.levelIndex); }
         } else if (S === GAME_STATE.PLAYING) {
           if (k === 'x' || k === 'X') endGame('Run abandoned');
           if (k === 'f' || k === 'F') camera.follow = !camera.follow;
@@ -1592,7 +1761,7 @@
 
     function drawTrail() {
       drawTrailOf(trail, trailFrame, '255,255,255', 0.35);
-      if (rival.active && !rival.dead) drawTrailOf(rival.trail, rival.trailFrame, '244,114,182', 0.3);
+      for (const r of rivals) if (!r.dead) drawTrailOf(r.trail, r.trailFrame, hexToRgb(r.color).join(','), 0.3);
     }
     function drawTrailOf(T, frame, rgb, alpha) {
       if (T.length < 4) return;
@@ -1679,13 +1848,15 @@
       ctx.restore();
       ctx.globalAlpha = 1;
     }
-    function drawRival() {
-      if (!rival.active || rival.dead) return;
-      ctx.save();
-      ctx.translate(rival.x, rival.y);
-      ctx.rotate(rival.rotation - Math.PI / 2);
-      drawRocketShape(rival.thrusting, rival.boosting, false, RIVAL_PALETTE);
-      ctx.restore();
+    function drawRivals() {
+      for (const r of rivals) {
+        if (r.dead) continue;
+        ctx.save();
+        ctx.translate(r.x, r.y);
+        ctx.rotate(r.rotation - Math.PI / 2);
+        drawRocketShape(r.thrusting, r.boosting, false, r.pal);
+        ctx.restore();
+      }
     }
 
     // ---------- Rendering: screen space ----------
@@ -1702,10 +1873,10 @@
     }
 
     function drawTargetArrow() {
-      if (rocket.dead) return;
+      if (rocket.dead || game.state !== GAME_STATE.PLAYING) return;   // not over the intro card or the results
       const target = findTarget();
       if (target) drawEdgeArrow(target.x, target.y, target.color, `${target.name.toUpperCase()} ${Math.round(Math.hypot(target.x - rocket.x, target.y - rocket.y))}`, 48);
-      if (rival.active && !rival.dead) drawEdgeArrow(rival.x, rival.y, rival.color, `${rival.name} ${Math.round(Math.hypot(rival.x - rocket.x, rival.y - rocket.y))}`, 64);
+      rivals.forEach((r, i) => { if (!r.dead) drawEdgeArrow(r.x, r.y, r.color, `${r.name} ${Math.round(Math.hypot(r.x - rocket.x, r.y - rocket.y))}`, 64 + i * 18); });
     }
     // An arrow at the screen edge pointing at an off-screen world point; nothing is drawn while the point is in view.
     function drawEdgeArrow(x, y, color, label, margin) {
@@ -1722,12 +1893,15 @@
       ctx.fillStyle = 'white'; ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(label, ax - Math.cos(ang) * 40, ay - Math.sin(ang) * 40);
     }
-    function drawRivalLabel() {   // its name floats over the rival's ship while it is in view
-      if (!rival.active || rival.dead) return;
-      const s = worldToScreen(rival.x, rival.y);
-      if (s.x < 0 || s.x > W || s.y < 0 || s.y > H) return;
-      ctx.fillStyle = rgba(rival.color, 0.85); ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-      ctx.fillText(rival.name, s.x, s.y - 6 - 3 * camera.scale);
+    function drawRivalLabels() {   // each rival's name floats over its ship while it is in view
+      ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+      for (const r of rivals) {
+        if (r.dead) continue;
+        const s = worldToScreen(r.x, r.y);
+        if (s.x < 0 || s.x > W || s.y < 0 || s.y > H) continue;
+        ctx.fillStyle = rgba(r.color, 0.85);
+        ctx.fillText(r.name, s.x, s.y - 6 - 3 * camera.scale);
+      }
     }
 
     // ---------- Console: on-screen buttons with their hotkeys ----------
@@ -1764,6 +1938,8 @@
         press() { launchSelected(); }, release() {}, active: () => false, enabled: () => !map.travel },
       { id: 'back', label: 'BACK', key: 'ESC', color: '#cbd5e1', x: 0, y: 0, w: 130, h: 40,
         press() { leaveMap(); }, release() {}, active: () => false, enabled: () => true },
+      { id: 'custom', label: 'CUSTOM', key: 'C', color: '#facc15', x: 0, y: 0, w: 140, h: 40,
+        press() { if (!map.travel) openCustom(); }, release() {}, active: () => false, enabled: () => !map.travel },
     ];
     function mapButtonAt(x, y) { return mapButtons.find(b => hit(b, x, y)) || null; }
     function roundRectPath(x, y, w, h, r) {
@@ -1840,14 +2016,25 @@
       ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(x, y, w, h);
       ctx.fillStyle = color; ctx.fillRect(x, y, w * clamp(frac, 0, 1), h);
     }
-    function drawRaceBar(x, y, w, h) {   // your share grows from the left, the rival's from the right; past the post in the middle wins outright
+    function drawRaceBar(x, y, w, h) {   // your share grows from the left, the rivals' stack in from the right; past the post in the middle wins outright
       const total = Math.max(1, game.raceTotal);
       ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(x, y, w, h);
       ctx.fillStyle = '#facc15'; ctx.fillRect(x, y, w * clamp(game.ore / total, 0, 1), h);
-      const rw = w * clamp(rival.ore / total, 0, 1);
-      const flash = game.ticks - rival.lastOreTick < 40 && game.ticks % 10 < 5;
-      ctx.fillStyle = flash ? '#ffffff' : rival.color; ctx.fillRect(x + w - rw, y, rw, h);
+      let right = x + w;
+      for (const r of rivals) {
+        const rw = w * clamp(r.ore / total, 0, 1);
+        const flash = game.ticks - r.lastOreTick < 40 && game.ticks % 10 < 5;
+        ctx.fillStyle = flash ? '#ffffff' : r.color; ctx.fillRect(right - rw, y, rw, h);
+        right -= rw;
+      }
       ctx.fillStyle = 'white'; ctx.fillRect(x + w / 2 - 1, y - 2, 2, h + 4);
+    }
+    function drawRaceStatus(x, y) {   // your tally, then each rival's in its own colour
+      ctx.textAlign = 'left'; ctx.font = '14px monospace';
+      const put = (txt, color) => { ctx.fillStyle = color; ctx.fillText(txt, x, y); x += ctx.measureText(txt).width; };
+      put(`YOU  ${game.ore}`, 'white');
+      for (const r of rivals) put(`     ${r.name}  ${r.ore}`, r.color);
+      put(`     ·   ${ores.length} LEFT`, 'rgba(255,255,255,0.7)');
     }
 
     function drawHUD() {
@@ -1857,9 +2044,9 @@
       // Level and objective
       ctx.textAlign = 'left';
       ctx.fillStyle = '#4fc3f7'; ctx.font = 'bold 18px SpaceFont, Arial';
-      ctx.fillText(`LEVEL ${game.levelIndex + 1}  ·  ${L.name}`, 16, 14);
+      ctx.fillText(`${game.levelIndex < 0 ? 'CUSTOM' : `LEVEL ${game.levelIndex + 1}`}  ·  ${L.name}`, 16, 14);
       ctx.fillStyle = 'white'; ctx.font = '14px monospace';
-      ctx.fillText(goalText(), 16, 40);
+      if (L.goal.type === 'race') drawRaceStatus(16, 40); else ctx.fillText(goalText(), 16, 40);
       if (L.goal.type === 'race') drawRaceBar(16, 62, 220, 6); else bar(16, 62, 220, 6, goalProgress(), '#facc15');
       // Timer
       ctx.textAlign = 'center';
@@ -1929,8 +2116,9 @@
           ctx.beginPath(); ctx.arc(cx + p.x * k, cy + p.y * k, 6, 0, Math.PI * 2); ctx.stroke();
         }
       }
-      if (rival.active && !rival.dead) {
-        ctx.fillStyle = rival.color; ctx.beginPath(); ctx.arc(cx + rival.x * k, cy + rival.y * k, 2.2, 0, Math.PI * 2); ctx.fill();
+      for (const r of rivals) {
+        if (r.dead) continue;
+        ctx.fillStyle = r.color; ctx.beginPath(); ctx.arc(cx + r.x * k, cy + r.y * k, 2.2, 0, Math.PI * 2); ctx.fill();
       }
       if (!rocket.dead) {
         ctx.fillStyle = 'white'; ctx.beginPath(); ctx.arc(cx + rocket.x * k, cy + rocket.y * k, 2, 0, Math.PI * 2); ctx.fill();
@@ -1950,7 +2138,7 @@
       overlay(0.55 * a);
       ctx.globalAlpha = a; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '20px SpaceFont, Arial';
-      ctx.fillText(`LEVEL ${game.levelIndex + 1} OF ${LEVELS.length}`, W / 2, H / 2 - 120);
+      ctx.fillText(game.levelIndex < 0 ? 'CUSTOM SYSTEM' : `LEVEL ${game.levelIndex + 1} OF ${LEVELS.length}`, W / 2, H / 2 - 120);
       ctx.fillStyle = '#4fc3f7'; ctx.font = 'bold 60px SpaceFont, Arial';
       ctx.fillText(L.name, W / 2, H / 2 - 60);
       ctx.fillStyle = 'white'; ctx.font = '20px monospace';
@@ -1978,11 +2166,11 @@
       ctx.globalAlpha = a; ctx.textBaseline = 'middle';
       ctx.textAlign = 'center';
       ctx.fillStyle = '#4ade80'; ctx.font = 'bold 60px SpaceFont, Arial';
-      ctx.fillText(s.rivalOre !== undefined ? 'RIVAL BEATEN' : 'LEVEL COMPLETE', W / 2, H / 2 - 110);
+      ctx.fillText(s.rivalOres.length > 1 ? 'RIVALS BEATEN' : s.rivalOres.length ? 'RIVAL BEATEN' : 'LEVEL COMPLETE', W / 2, H / 2 - 110);
       ctx.font = '18px monospace';
       const rows = [
         ['ORE COLLECTED', `${s.ore}`],
-        ...(s.rivalOre !== undefined ? [['RIVAL ORE', `${s.rivalOre}`]] : []),
+        ...s.rivalOres.map(r => [`${r.name} ORE`, `${r.ore}`]),
         [`TIME BONUS  (${formatTime(s.timeLeft)} left)`, `+${s.timeBonus}`],
         ['LEVEL BONUS', `+${s.levelBonus}`],
         ['EXTRA LIFE', '+1'],
@@ -1994,7 +2182,7 @@
         ctx.textAlign = 'left'; ctx.fillStyle = i === rows.length - 1 ? '#facc15' : 'white'; ctx.fillText(v, W / 2 + 10, y);
       });
       ctx.textAlign = 'center';
-      if (game.stateTimer > 45) pulseText(game.levelIndex + 1 < LEVELS.length ? 'PRESS SPACE TO FLY ON' : 'PRESS SPACE', W / 2, H / 2 + 130);
+      if (game.stateTimer > 45) pulseText(game.levelIndex >= 0 && game.levelIndex + 1 < LEVELS.length ? 'PRESS SPACE TO FLY ON' : 'PRESS SPACE', W / 2, H / 2 + 130);
       ctx.globalAlpha = 1;
     }
 
@@ -2007,8 +2195,8 @@
       ctx.fillStyle = 'white'; ctx.font = '20px monospace';
       ctx.fillText(game.gameOverReason.toUpperCase(), W / 2, H / 2 - 40);
       ctx.font = '18px monospace';
-      ctx.fillText(`REACHED LEVEL ${game.levelIndex + 1}   ·   SCORE ${game.score}`, W / 2, H / 2 + 10);
-      if (game.score > 0 && game.score >= highScore) { ctx.fillStyle = '#facc15'; ctx.fillText('NEW HIGH SCORE!', W / 2, H / 2 + 45); }
+      ctx.fillText(`${game.levelIndex < 0 ? 'CUSTOM SYSTEM' : `REACHED LEVEL ${game.levelIndex + 1}`}   ·   SCORE ${game.score}`, W / 2, H / 2 + 10);
+      if (game.levelIndex >= 0 && game.score > 0 && game.score >= highScore) { ctx.fillStyle = '#facc15'; ctx.fillText('NEW HIGH SCORE!', W / 2, H / 2 + 45); }
       else { ctx.fillStyle = '#4fc3f7'; ctx.fillText(`HIGH SCORE ${highScore}`, W / 2, H / 2 + 45); }
       if (game.stateTimer > 90) pulseText('PRESS SPACE', W / 2, H / 2 + 120);
       ctx.globalAlpha = 1;
@@ -2152,16 +2340,109 @@
       if (levelBelts(sel).length) tags.push('ASTEROIDS');
       if (sel.battery) tags.push('BATTERY');
       if (sel.noNav) tags.push('NO NAV AI');
-      if (sel.rival) tags.push('RIVAL');
+      const nr = levelRivals(sel).length;
+      if (nr) tags.push(nr > 1 ? `${nr} RIVALS` : 'RIVAL');
       ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.font = '13px monospace';
       ctx.fillText(tags.join('   ·   '), W / 2, H - 120);
       // buttons
-      const go = mapButtons[0], back = mapButtons[1];
+      const go = mapButtons[0], back = mapButtons[1], cust = mapButtons[2];
       go.x = W / 2 - go.w / 2; go.y = H - 84;
       back.x = 16; back.y = H - 56; back.label = game.inRun ? 'QUIT RUN' : 'BACK';
-      drawButton(go); drawButton(back);
+      cust.x = W - 16 - cust.w; cust.y = H - 56;
+      drawButton(go); drawButton(back); drawButton(cust);
       ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('ARROWS  choose a system     ENTER  launch     click a star to select it, click again to go', W / 2, H - 18);
+      ctx.fillText('ARROWS  choose a system     ENTER  launch     C  build your own     click a star to select it, click again to go', W / 2, H - 18);
+      ctx.restore();
+    }
+
+    function drawCustom() {
+      const t = game.ticks, L = custom.level;
+      drawStars(t * 0.1, 0, t);
+      ctx.save();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#facc15'; ctx.font = 'bold 34px SpaceFont, Arial';
+      ctx.fillText('CUSTOM SYSTEM', W / 2, 44);
+      ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '14px monospace';
+      ctx.fillText('BUILD A STAR SYSTEM AND FLY IT', W / 2, 72);
+      // the choices
+      const lx = Math.round(W * 0.08), vx = Math.round(W * 0.34), y0 = Math.round(H * 0.3), dy = 64;
+      CUSTOM_ROWS.forEach((row, i) => {
+        const y = y0 + i * dy, sel = i === custom.row, dim = row.key === 'skill' && custom.rivals === 0, v = custom[row.key];
+        const R = custom.rows[i]; R.x = lx - 16; R.y = y - 24; R.w = vx + 150 - R.x; R.h = 48;
+        if (sel) { ctx.fillStyle = 'rgba(79,195,247,0.1)'; roundRectPath(R.x, R.y, R.w, R.h, 8); ctx.fill(); }
+        ctx.globalAlpha = dim ? 0.35 : 1;
+        ctx.textAlign = 'left'; ctx.fillStyle = sel ? '#4fc3f7' : 'rgba(255,255,255,0.8)'; ctx.font = `${sel ? 'bold ' : ''}16px SpaceFont, Arial`;
+        ctx.fillText(row.label, lx, y);
+        ctx.textAlign = 'center'; ctx.fillStyle = 'white'; ctx.font = 'bold 20px monospace';
+        ctx.fillText(row.text(v), vx + 66, y);
+        for (const h of custom.hit) {   // the arrows either side of the value
+          if (h.row !== i) continue;
+          h.x = h.delta < 0 ? vx - 14 : vx + 118; h.y = y - 14; h.w = 28; h.h = 28;
+          const can = h.delta < 0 ? v > row.min : v < row.max;
+          ctx.fillStyle = !can ? 'rgba(255,255,255,0.15)' : hoverButton === h ? '#ffffff' : sel ? '#4fc3f7' : 'rgba(255,255,255,0.6)';
+          ctx.beginPath();
+          if (h.delta < 0) { ctx.moveTo(h.x + 19, h.y + 5); ctx.lineTo(h.x + 8, h.y + 14); ctx.lineTo(h.x + 19, h.y + 23); }
+          else { ctx.moveTo(h.x + 9, h.y + 5); ctx.lineTo(h.x + 20, h.y + 14); ctx.lineTo(h.x + 9, h.y + 23); }
+          ctx.closePath(); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      });
+      // what the rival handicap means, under the choices
+      const sk = CUSTOM_SKILLS[custom.skill], ly = y0 + CUSTOM_ROWS.length * dy - 10;
+      ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.font = '12px monospace';
+      if (custom.rivals > 0) {
+        ctx.fillText(`${sk.label}: ${Math.round(sk.thrust * 100)}% thrust, ${Math.round(sk.turn * 100)}% turn rate,`, lx, ly);
+        ctx.fillText(`pauses ${(sk.pause / 60).toFixed(0)} s after each capture and ${(sk.linger / 60).toFixed(0)} s after each pickup`, lx, ly + 18);
+      } else {
+        ctx.fillText('No rivals: collect the ore quota before time runs out', lx, ly);
+      }
+      // the generated system
+      const cx = Math.round(W * 0.73), cy = Math.round(H * 0.47), R = Math.round(Math.min(W * 0.17, H * 0.25));
+      drawCustomPreview(cx, cy, R);
+      const nr = levelRivals(L).length;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = Object.assign({}, DEFAULT_STAR, L.star).color; ctx.font = 'bold 22px SpaceFont, Arial';
+      ctx.fillText(L.name, cx, cy + R + 36);
+      ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '13px monospace';
+      ctx.fillText(`${L.planets.length} WORLDS   ·   ${L.oreTotal} ORE   ·   TIME ${formatTime(L.time)}`, cx, cy + R + 60);
+      ctx.fillText(nr ? `WIN: MORE ORE THAN ${nr > 1 ? 'EVERY RIVAL' : 'THE RIVAL'}` : `WIN: COLLECT ${L.goal.count} ORE`, cx, cy + R + 80);
+      // buttons
+      const go = customButtons[0], back = customButtons[1], shuf = customButtons[2];
+      go.x = W / 2 - go.w / 2; go.y = H - 84;
+      back.x = 16; back.y = H - 56;
+      shuf.x = W - 16 - shuf.w; shuf.y = H - 56;
+      drawButton(go); drawButton(back); drawButton(shuf);
+      ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('UP / DOWN  choose a setting     LEFT / RIGHT  change it     R  new layout     ENTER  launch', W / 2, H - 18);
+      ctx.restore();
+    }
+    function drawCustomPreview(cx, cy, R) {   // the system to scale: orbits, worlds, and who starts where
+      const L = custom.level, S = Object.assign({}, DEFAULT_STAR, L.star), nr = levelRivals(L).length;
+      let range = 0;
+      for (const p of L.planets) range = Math.max(range, p.distance);
+      const k = R / (range * 1.08), inner = L.planets[0].distance;
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.strokeStyle = 'rgba(79,195,247,0.35)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(cx, cy, R + 12, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      const sr = Math.max(4, S.radius * k);
+      const g = ctx.createRadialGradient(cx, cy, sr * 0.5, cx, cy, sr * 3);
+      g.addColorStop(0, rgba(S.color, 0.5)); g.addColorStop(1, rgba(S.color, 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, sr * 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = S.color; ctx.beginPath(); ctx.arc(cx, cy, sr, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      for (const p of L.planets) { ctx.beginPath(); ctx.arc(cx, cy, p.distance * k, 0, Math.PI * 2); ctx.stroke(); }
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold 9px monospace';
+      for (const p of L.planets) {
+        const a = p.startAngle + game.ticks * 0.004 * Math.pow(inner / p.distance, 1.5);   // the worlds turn, inner ones fastest
+        const x = cx + Math.cos(a) * p.distance * k, y = cy + Math.sin(a) * p.distance * k, pr = 2 + p.radius * 0.35;
+        ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(x, y, pr, 0, Math.PI * 2); ctx.fill();
+        const tag = p.home ? { text: 'YOU', color: '#4fc3f7' }
+                  : p.rivalHome !== undefined ? { text: rivalName(p.rivalHome, nr), color: RIVAL_LOOKS[p.rivalHome].color } : null;
+        if (!tag) continue;
+        ctx.strokeStyle = tag.color; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(x, y, pr + 4, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = tag.color; ctx.fillText(tag.text, x, y - pr - 10);
+      }
       ctx.restore();
     }
 
@@ -2171,7 +2452,7 @@
       updateParticles(); updatePopups();
       if (camera.shake > 0) { camera.shake *= 0.88; if (camera.shake < 0.3) camera.shake = 0; }
       const S = game.state;
-      if (S === GAME_STATE.WELCOME) return;
+      if (S === GAME_STATE.WELCOME || S === GAME_STATE.CUSTOM) return;
       if (S === GAME_STATE.MAP) { updateTravel(); return; }
       if (S === GAME_STATE.LEVEL_INTRO) {   // the world turns while the player reads; nothing launches until they do
         stepWorld(); computePrediction(); updateCamera();
@@ -2179,11 +2460,12 @@
       }
       if (S === GAME_STATE.PLAYING) {
         handleInput(); updatePower();
-        if (rival.active) { rivalThink(); rivalInput(); }
+        rivalPlanSpent = 0;   // the rivals take turns going first, so a slow planner cannot starve the others
+        for (let j = 0; j < rivals.length; j++) { rival = rivals[(j + game.ticks) % rivals.length]; rivalThink(); rivalInput(); }
         stepWorld();
         if (!rocket.dead) { checkCollisions(); collectItems(); }
-        if (rival.active && !rival.dead && game.state === GAME_STATE.PLAYING) { rivalCollisions(); rivalCollect(); }
-        if (game.state === GAME_STATE.PLAYING) { updateTimer(); updateCombo(); handleRespawn(); rivalRespawn(); }
+        for (const r of rivals) { if (game.state !== GAME_STATE.PLAYING || r.dead) continue; rival = r; rivalCollisions(); rivalCollect(); }
+        if (game.state === GAME_STATE.PLAYING) { updateTimer(); updateCombo(); handleRespawn(); for (const r of rivals) { rival = r; rivalRespawn(); } }
         computePrediction(); updateCamera(); syncEngineAudio();
         return;
       }
@@ -2194,6 +2476,7 @@
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = '#02030a'; ctx.fillRect(0, 0, W, H);
       if (game.state === GAME_STATE.MAP) { drawMap(); return; }
+      if (game.state === GAME_STATE.CUSTOM) { drawCustom(); return; }
       if (game.state === GAME_STATE.WELCOME || !game.level) { drawWelcome(); return; }
 
       drawStars(-camera.offsetX / camera.scale, -camera.offsetY / camera.scale, game.ticks);
@@ -2208,11 +2491,11 @@
       drawTrail();
       drawPrediction();
       drawParticles();
-      drawRival();
+      drawRivals();
       drawRocket();
 
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      drawRivalLabel();
+      drawRivalLabels();
       drawPopups();
       drawTargetArrow();
       drawHUD();
@@ -2235,8 +2518,16 @@
 
     makeStars();
     addListeners();
+    loadCustom();
     const devLevel = parseInt(new URLSearchParams(location.search).get('level'));
     if (devLevel >= 1 && devLevel <= LEVELS.length) { newGame(devLevel - 1); beginPlay(); }
+    const devCustom = new URLSearchParams(location.search).get('custom');   // planets,size,rivals,skill[,seed]: straight into a custom system
+    if (devCustom) {
+      const v = devCustom.split(',').map(Number);
+      CUSTOM_ROWS.forEach((row, i) => { if (!isNaN(v[i])) custom[row.key] = clamp(v[i], row.min, row.max); });
+      if (v[4] > 0) custom.seed = v[4];
+      custom.level = makeCustomLevel(custom); newGame(-1); beginPlay();
+    }
     requestAnimationFrame(loop);
   </script>
 </body>
