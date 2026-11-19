@@ -85,6 +85,7 @@
     // ---------- Levels ----------
     // goal.type 'ore'   : collect goal.count ore anywhere
     // goal.type 'visit' : collect at least one ore at every planet
+    // goal.type 'race'  : finish with more ore than the rival ship (level.rival), which mines the same belts
     const LEVELS = [
       { name: 'FIRST ORBIT', theme: 'calm',
         brief: 'Collect 10 ore from orbit around Terra.',
@@ -285,6 +286,26 @@
           { name: 'Queen', radius: 10, distance: 360, color: '#a855f7', ore: 6, fuel: 5, startAngle: 3.8 },
           { name: 'Husk', radius: 5, distance: 470, color: '#f97316', ore: 5, fuel: 4, startAngle: 5.0 },
         ] },
+      { name: 'BONANZA', theme: 'storm', battery: true, nearZoom: 1.5,
+        star: { name: 'Bonanza', radius: 22, color: '#fbbf24', mass: 700000, luminosity: 1.2, heatRadius: 55 },
+        rival: { name: 'RIVAL', color: '#f472b6', thrust: 0.75, turn: 0.75, pause: 360, linger: 180 },   // an older ship, and it dawdles
+        brief: 'Ten worlds and a rival prospector. Finish with more ore than it.',
+        hint: 'The pink ship mines the same belts. Every ore it takes is one you cannot.',
+        notes: ['NEW: A RIVAL. The pink arrow at the screen edge points to its ship.',
+                'Hold more than half the ore to win outright, or lead when time runs out.'],
+        goal: { type: 'race' }, time: 360,
+        planets: [
+          { name: 'Grit', radius: 4, distance: 110, color: '#d4d4d8', ore: 3, fuel: 3, startAngle: 0.0 },
+          { name: 'Flint', radius: 5, distance: 165, color: '#a8a29e', ore: 4, fuel: 3, startAngle: 1.1 },
+          { name: 'Seam', radius: 6, distance: 225, color: '#4ade80', ore: 5, fuel: 4, startAngle: 2.3 },
+          { name: 'Lode', radius: 8, distance: 290, color: '#3b82f6', home: true, ore: 6, fuel: 8, startAngle: 3.4 },
+          { name: 'Vein', radius: 5, distance: 360, color: '#fb923c', ore: 4, fuel: 4, startAngle: 4.6 },
+          { name: 'Shale', radius: 7, distance: 435, color: '#94a3b8', ore: 5, fuel: 4, startAngle: 5.7 },
+          { name: 'Nugget', radius: 6, distance: 515, color: '#fde047', ore: 5, fuel: 4, startAngle: 0.6 },
+          { name: 'Slag', radius: 8, distance: 600, color: '#f87171', rivalHome: true, ore: 6, fuel: 8, startAngle: 1.3 },
+          { name: 'Quartz', radius: 5, distance: 690, color: '#e0e7ff', ore: 4, fuel: 4, startAngle: 3.0 },
+          { name: 'Ingot', radius: 9, distance: 785, color: '#c084fc', ore: 5, fuel: 5, startAngle: 4.2 },
+        ] },
       { name: 'OMEGA', theme: 'storm', battery: true,
         star: { name: 'Omega', radius: 36, color: '#fde047', mass: 1200000, luminosity: 0.9, heatRadius: 150 },
         brief: 'The last system. Strip it of 50 ore to conquer the galaxy.',
@@ -329,6 +350,15 @@
       dead: false, respawnTimer: 0, heat: 0, invuln: 0,
       thrusting: false, boosting: false,
     };
+    // The rival prospector on race levels: a second ship with the same physics, flown by the game.
+    const rival = {
+      active: false, name: 'RIVAL', color: '#f472b6',
+      x: 0, y: 0, vx: 0, vy: 0, rotation: 0, rotationSpeed: 0.05, mass: 20, thrustPower: 0.06, boostPower: 0.5,
+      fuel: 0, ore: 0, dead: false, respawnTimer: 0, heat: 0, thrusting: false, boosting: false, crashes: 0, lastOreTick: -999,
+      ctl: { left: false, right: false, up: false, boost: false },   // what its pilot is pressing
+      trail: [], trailFrame: null, nearest: null, nearestSQ: Infinity,
+      ai: null,
+    };
 
     const game = {
       state: GAME_STATE.WELCOME, levelIndex: 0, level: null,
@@ -337,6 +367,7 @@
       gameOverReason: '', deathReason: '', stats: null,
       nav: true,                  // nav AI switched on (only matters on battery levels)
       inRun: false,               // a run is in progress (score and lives carry across the star map)
+      raceTotal: 0,               // ore in play on a race level
     };
     let highScore = parseInt(localStorage.getItem('orbitalHighScore')) || 0;
     let maxLevelReached = parseInt(localStorage.getItem('orbitalMaxLevel')) || 0;   // index of the furthest level unlocked
@@ -387,14 +418,14 @@
 
     function buildLevel(def) {
       planets.length = 0; ores.length = 0; fuels.length = 0; asteroids.length = 0;
-      particles.length = 0; rings.length = 0; popups.length = 0; trail.length = 0;
+      particles.length = 0; rings.length = 0; popups.length = 0; trail.length = 0; rival.trail.length = 0;
       Object.assign(sun, DEFAULT_STAR, def.star || {});
       def.planets.forEach((d, i) => {
         const mass = calculateMass(d.radius);
         const a = d.startAngle === undefined ? i * 1.7 : d.startAngle;
         const v = orbitalVelocity(sun.mass, d.distance) * (d.retro ? -1 : 1);   // retrograde worlds orbit the other way
         const p = {
-          name: d.name, radius: d.radius, color: d.color, mass, home: !!d.home, distance: d.distance, retro: !!d.retro,
+          name: d.name, radius: d.radius, color: d.color, mass, home: !!d.home, rivalHome: !!d.rivalHome, distance: d.distance, retro: !!d.retro,
           x: Math.cos(a) * d.distance, y: Math.sin(a) * d.distance,
           vx: -Math.sin(a) * v, vy: Math.cos(a) * v,
           soi: soiRadius(mass), oreTotal: d.ore, collected: 0,
@@ -481,12 +512,18 @@
         gravityAt(rocket.x, rocket.y, rocket.mass, gravBodies, tmpForce);
         integrate(rocket, tmpForce, dt);
       }
+      if (rival.active && !rival.dead) {
+        gravityAt(rival.x, rival.y, rival.mass, gravBodies, tmpForce);
+        integrate(rival, tmpForce, dt);
+        nearestBody(rival);
+      }
       closestPlanet = null; closestDistanceSQ = Infinity;
       for (const b of gravBodies) {
         const dx = b.x - rocket.x, dy = b.y - rocket.y, d2 = dx * dx + dy * dy;
         if (d2 < closestDistanceSQ) { closestDistanceSQ = d2; closestPlanet = b; }
       }
       if (!rocket.dead && game.ticks % 2 === 0) recordTrail();
+      if (rival.active && !rival.dead && game.ticks % 2 === 0) rival.trailFrame = recordTrailInto(rival, rival.trail, rival.trailFrame, dominantBodyOf(rival));
       moveCollectibles(dt);
       if (rocket.invuln > 0) rocket.invuln--;
     }
@@ -498,16 +535,29 @@
       const soi = closestPlanet === sun ? soiRadius(sun.mass) : closestPlanet.soi;
       return closestDistanceSQ < soi * soi ? closestPlanet : null;
     }
-    function recordTrail() {
-      const frame = dominantBody();
-      if (frame !== trailFrame) {   // re-base the stored points so the line never jumps when the frame changes
-        const ox = (trailFrame ? trailFrame.x : 0) - (frame ? frame.x : 0);
-        const oy = (trailFrame ? trailFrame.y : 0) - (frame ? frame.y : 0);
-        for (let i = 0; i < trail.length; i += 2) { trail[i] += ox; trail[i + 1] += oy; }
-        trailFrame = frame;
+    function recordTrail() { trailFrame = recordTrailInto(rocket, trail, trailFrame, dominantBody()); }
+    function recordTrailInto(ship, T, oldFrame, frame) {   // appends the ship's position to T, stored relative to frame; returns the frame
+      if (frame !== oldFrame) {   // re-base the stored points so the line never jumps when the frame changes
+        const ox = (oldFrame ? oldFrame.x : 0) - (frame ? frame.x : 0);
+        const oy = (oldFrame ? oldFrame.y : 0) - (frame ? frame.y : 0);
+        for (let i = 0; i < T.length; i += 2) { T[i] += ox; T[i + 1] += oy; }
       }
-      trail.push(rocket.x - (frame ? frame.x : 0), rocket.y - (frame ? frame.y : 0));
-      if (trail.length > TRAIL_LENGTH * 2) trail.splice(0, 2);
+      T.push(ship.x - (frame ? frame.x : 0), ship.y - (frame ? frame.y : 0));
+      if (T.length > TRAIL_LENGTH * 2) T.splice(0, 2);
+      return frame;
+    }
+    function nearestBody(ship) {   // the gravitating body closest to a ship, cached on it
+      let best = null, bestSQ = Infinity;
+      for (const b of gravBodies) {
+        const dx = b.x - ship.x, dy = b.y - ship.y, d2 = dx * dx + dy * dy;
+        if (d2 < bestSQ) { bestSQ = d2; best = b; }
+      }
+      ship.nearest = best; ship.nearestSQ = bestSQ;
+    }
+    function dominantBodyOf(ship) {
+      if (!ship.nearest) return null;
+      const soi = ship.nearest === sun ? soiRadius(sun.mass) : ship.nearest.soi;
+      return ship.nearestSQ < soi * soi ? ship.nearest : null;
     }
 
     function moveCollectibles(dt) {
@@ -535,6 +585,7 @@
           sparkle(o.x, o.y, '#facc15');
           OrbitalAudio.sfx.collectOre(game.combo);
           if (goalMet()) { completeLevel(); return; }
+          if (raceCheck()) return;
         }
       }
       for (let i = fuels.length - 1; i >= 0; i--) {
@@ -598,6 +649,338 @@
       }
     }
 
+    // ---------- The rival ----------
+    // On race levels a second ship mines the same belts. It obeys the same physics and controls as the player's
+    // rocket; its pilot (further down) presses the same four controls.
+    const RIVAL_RESPAWN = 240;            // ticks out of action after a crash
+    const RIVAL_BUDGET = 1200;            // ticks it works one world before moving on even if ore remains
+    const RIVAL_PLAN_MS = 2.5, RIVAL_SIMS_PER_TICK = 40;   // planning budget per tick: whichever runs out first
+    const RIVAL_PALETTE = { body: '#fbcfe8', nose: '#f472b6', fin: '#9d174d' };
+
+    function setupRival(L) {
+      rival.active = !!L.rival;
+      rival.ore = 0; rival.crashes = 0; rival.lastOreTick = -999; rival.dead = false;
+      if (!rival.active) return;
+      const R = L.rival;
+      rival.name = R.name || 'RIVAL'; rival.color = R.color || '#f472b6';
+      rival.thrustPower = rocket.thrustPower * (R.thrust || 1);
+      rival.boostPower = rocket.boostPower * (R.boost || 1);
+      rival.rotationSpeed = rocket.rotationSpeed * (R.turn || 1);
+      rival.fuel = L.startFuel || START_FUEL;
+      spawnRival();
+    }
+    function rivalHome() { return planets.find(p => p.rivalHome) || planets[planets.length - 1]; }
+    // Into a circular orbit around its home world, on the far side from where a player would spawn, going the same way round.
+    function spawnRival() {
+      const home = rivalHome(), d = home.radius + 12, v = orbitalVelocity(home.mass, d);
+      rival.x = home.x - d; rival.y = home.y; rival.vx = home.vx; rival.vy = home.vy - v;
+      rival.rotation = 0; rival.dead = false; rival.heat = 0; rival.thrusting = false; rival.boosting = false;
+      rival.trail.length = 0; rival.trailFrame = null; rival.nearest = home; rival.nearestSQ = d * d;
+      const c = rival.ctl; c.left = c.right = c.up = c.boost = false;
+      rival.ai = { phase: 'sweep', planet: home, target: null, dest: null, R: d, r: d, t: 0, playT: 0, arrivedT: 0, visits: 0,
+                   evading: 0, pause: 0, plan: null, burned: 0, search: null, skip: {}, lookT: 0, danger: null, corr: null };
+    }
+    function rivalInput() {
+      if (rival.dead) return;
+      const c = rival.ctl;
+      if (c.left) rival.rotation -= rival.rotationSpeed;
+      if (c.right) rival.rotation += rival.rotationSpeed;
+      const dx = Math.sin(rival.rotation), dy = -Math.cos(rival.rotation);
+      rival.thrusting = !!c.up;
+      rival.boosting = !!c.boost && rival.fuel > 0;
+      if (rival.thrusting) { rival.vx += dx * rival.thrustPower; rival.vy += dy * rival.thrustPower; }
+      if (rival.boosting) { rival.fuel = Math.max(0, rival.fuel - 1); rival.vx += dx * rival.boostPower; rival.vy += dy * rival.boostPower; }
+      if (rival.boosting) exhaust(true, rival);
+      else if (rival.thrusting) exhaust(false, rival);
+    }
+    function rivalCollisions() {
+      const ds = Math.hypot(rival.x - sun.x, rival.y - sun.y);
+      if (ds < sun.radius + 1) return destroyRival('flew into the sun');
+      if (ds < sun.heatRadius) {
+        rival.heat = Math.min(1, rival.heat + (1 - ds / sun.heatRadius) * 0.025);
+        if (rival.heat >= 1) return destroyRival('melted');
+      } else rival.heat = Math.max(0, rival.heat - 0.004);
+      for (const p of planets) {
+        const r = p.radius + 1.5, dx = p.x - rival.x, dy = p.y - rival.y;
+        if (dx * dx + dy * dy < r * r) return destroyRival(`crashed into ${p.name}`);
+      }
+      for (const a of asteroids) {
+        const r = a.radius + 1.5, dx = a.x - rival.x, dy = a.y - rival.y;
+        if (dx * dx + dy * dy < r * r) return destroyRival('hit an asteroid');
+      }
+    }
+    function destroyRival(reason) {
+      if (rival.dead) return;
+      rival.dead = true; rival.respawnTimer = RIVAL_RESPAWN; rival.heat = 0; rival.thrusting = false; rival.boosting = false; rival.crashes++;
+      const c = rival.ctl; c.left = c.right = c.up = c.boost = false;
+      explode(rival.x, rival.y, rival.vx, rival.vy);
+      popup(rival.x, rival.y - 6, `${rival.name} ${reason.toUpperCase()}`, rival.color, 14);
+    }
+    function rivalCollect() {
+      for (let i = ores.length - 1; i >= 0; i--) {
+        const o = ores[i], dx = o.x - rival.x, dy = o.y - rival.y;
+        if (dx * dx + dy * dy < COLLECT_RADIUS_SQ) {
+          ores.splice(i, 1);
+          rival.ore++; rival.lastOreTick = game.ticks;
+          rival.ai.pause = Math.max(rival.ai.pause, game.level.rival.linger || 0);   // it savours each find for a moment
+          popup(o.x, o.y, `${rival.name} +1`, rival.color, 12);
+          sparkle(o.x, o.y, rival.color);
+          if (raceCheck()) return;
+        }
+      }
+      for (let i = fuels.length - 1; i >= 0; i--) {
+        const f = fuels[i], dx = f.x - rival.x, dy = f.y - rival.y;
+        if (dx * dx + dy * dy < COLLECT_RADIUS_SQ) {
+          fuels.splice(i, 1);
+          rival.fuel = Math.min(MAX_FUEL, rival.fuel + FUEL_PER_PICKUP);
+          popup(f.x, f.y, `${rival.name} +BOOST`, rival.color, 12);
+          sparkle(f.x, f.y, rival.color);
+        }
+      }
+    }
+    function rivalRespawn() {
+      if (!rival.active || !rival.dead) return;
+      if (--rival.respawnTimer > 0) return;
+      spawnRival();
+      rival.fuel = Math.max(rival.fuel, START_FUEL);
+    }
+
+    // ---------- The rival's pilot ----------
+    // It flies the way a careful player would: hold a circular orbit at the radius of the next ore and slide along the
+    // belt to meet it; once a world is worked out, plan a booster burn to the next one by simulating candidate burns with
+    // the real physics. The search is spread over several ticks (coasting meanwhile) so it never stalls a frame.
+    const normAngle = a => Math.atan2(Math.sin(a), Math.cos(a));
+    const vCircular = (p, r) => Math.sqrt(G * p.mass / r);
+    const simBodies = [];   // scratch copies of the planets for the pilot's simulations
+
+    function rivalSteer(ax, ay, tol) {   // point the nose along (ax, ay); true once within tol radians
+      const diff = normAngle(Math.atan2(ax, -ay) - rival.rotation);
+      rival.ctl.left = diff < -0.03; rival.ctl.right = diff > 0.03;
+      return Math.abs(diff) < tol;
+    }
+    function rivalBurn(ax, ay, on, boost, force, emergency) {   // thrust along an error vector: main engine above `on`, booster above `boost`
+      const mag = Math.hypot(ax, ay), c = rival.ctl;
+      if (mag <= on) { c.up = false; c.boost = false; return false; }
+      const aligned = rivalSteer(ax, ay, 0.25);
+      c.up = aligned;
+      c.boost = aligned && (force || mag > boost) && rival.fuel > (emergency ? 0 : 25);   // keep a reserve, except to dodge a crash
+      return true;
+    }
+    function rivalRel(p) {   // motion relative to p: radial and tangential unit vectors and speeds
+      const dx = rival.x - p.x, dy = rival.y - p.y, r = Math.hypot(dx, dy) || 1e-6;
+      const ux = dx / r, uy = dy / r, vx = rival.vx - p.vx, vy = rival.vy - p.vy;
+      const s = dx * vy - dy * vx >= 0 ? 1 : -1, tx = -uy * s, ty = ux * s;   // s is +1 when going the way the ore drifts
+      return { r, ux, uy, vx, vy, s, tx, ty, vr: vx * ux + vy * uy, vt: vx * tx + vy * ty, ang: Math.atan2(dy, dx) };
+    }
+    function rivalHold(p, R, boostAbove) {   // fly a near-circular orbit around p, easing the radius towards R; returns the error size
+      const k = rivalRel(p), ai = rival.ai;
+      ai.r = k.r;
+      const inward = Math.max(10, 0.45 * (k.r - R));
+      const vrDes = clamp(0.9 * (R - k.r), -inward, 10);
+      const er = vrDes - k.vr, et = vCircular(p, k.r) - k.vt;
+      const ax = k.ux * er + k.tx * et, ay = k.uy * er + k.ty * et, mag = Math.hypot(ax, ay);
+      const big = Math.abs(R - k.r) > 6 && mag > 5;
+      if (!rivalBurn(ax, ay, 1.2, boostAbove, big)) rivalSteer(k.tx, k.ty, 0.2);   // coast facing prograde
+      return mag;
+    }
+    function snapshotWorld() {
+      return { x: rival.x, y: rival.y, vx: rival.vx, vy: rival.vy,
+               B: planets.map(q => ({ x: q.x, y: q.y, vx: q.vx, vy: q.vy, mass: q.mass, radius: q.radius })) };
+    }
+    // Simulate from a snapshot: coast `wait` ticks, burn `n` ticks along (bx, by) at power `pw`, coast on. Mirrors the
+    // game's tick order exactly. Returns the closest approach to `dest`, or the step a crash would happen on.
+    function rivalSim(S, wait, bx, by, n, pw, maxT, dest, origin) {
+      const B = simBodies; B.length = 0;
+      for (const q of S.B) B.push({ x: q.x, y: q.y, vx: q.vx, vy: q.vy, mass: q.mass, radius: q.radius });
+      const D = dest ? B[planets.indexOf(dest)] : null, O = origin ? B[planets.indexOf(origin)] : null;
+      let x = S.x, y = S.y, vx = S.vx, vy = S.vy;
+      const dt = TIME_SCALE, m = rival.mass, sunCore = sun.radius * sun.radius * 0.25, heat2 = sun.heatRadius * sun.heatRadius * 0.8;
+      let dmin = Infinity, tmin = 0, vrel = 0;
+      for (let t = 0; t < maxT; t++) {
+        if (t >= wait && t < wait + n) { vx += bx * pw; vy += by * pw; }
+        for (let i = 0; i < B.length; i++) {
+          const b = B[i], dx = -b.x, dy = -b.y, d2 = dx * dx + dy * dy, f = G * b.mass * sun.mass / d2, d = Math.sqrt(d2);
+          b.vx += f * dx / d / b.mass * dt; b.vy += f * dy / d / b.mass * dt; b.x += b.vx * dt; b.y += b.vy * dt;
+        }
+        let fx, fy;
+        { const dx = -x, dy = -y, d2 = Math.max(dx * dx + dy * dy, sunCore), f = G * m * sun.mass / d2, d = Math.sqrt(d2); fx = f * dx / d; fy = f * dy / d; }
+        for (let i = 0; i < B.length; i++) {
+          const b = B[i], dx = b.x - x, dy = b.y - y, d2 = Math.max(dx * dx + dy * dy, b.radius * b.radius * 0.25), f = G * m * b.mass / d2;
+          if (f < MIN_FORCE) continue;
+          const d = Math.sqrt(d2); fx += f * dx / d; fy += f * dy / d;
+        }
+        vx += fx / m * dt; vy += fy / m * dt; x += vx * dt; y += vy * dt;
+        if (x * x + y * y < heat2) return { crash: t, body: sun };
+        for (let i = 0; i < B.length; i++) {
+          const b = B[i], dx = b.x - x, dy = b.y - y, rr = b.radius + 3;
+          if (dx * dx + dy * dy < rr * rr) return { crash: t, body: planets[i] };
+        }
+        if (asteroids.length && t % 3 === 0) {
+          const tt = t * dt;
+          for (const a of asteroids) {
+            const ang = a.angle + a.omega * tt, dx = Math.cos(ang) * a.dist - x, dy = Math.sin(ang) * a.dist - y, rr = a.radius + 2;
+            if (dx * dx + dy * dy < rr * rr) return { crash: t, body: a };
+          }
+        }
+        if (D) {
+          const dd = Math.hypot(D.x - x, D.y - y);
+          if (dd < dmin) { dmin = dd; tmin = t; vrel = Math.hypot(vx - D.vx, vy - D.vy); }
+          else if (t > wait + n && ((dd > dmin + 15 && dmin < 150) || dd > dmin + 120)) break;   // past the closest approach
+          if (O && t === wait + n + 240 && Math.hypot(O.x - x, O.y - y) < O.radius + 60) break;      // never escaped the world it left
+        }
+      }
+      return { dmin, tmin, vrel };
+    }
+    function rivalLookahead() {   // a short no-thrust prediction, refreshed every few ticks, so crashes are seen coming
+      const ai = rival.ai;
+      if (ai.lookT-- > 0) return;
+      ai.lookT = 5;
+      const r = rivalSim(snapshotWorld(), 0, 0, 0, 0, 0, 210, null);
+      ai.danger = r.crash !== undefined ? r : null;
+    }
+    function rivalEvade() {   // burn straight away from whatever it is about to hit
+      const ai = rival.ai, d = ai.danger;
+      if (!d || d.crash > (ai.phase === 'coast' ? 120 : 210)) return false;
+      const dx = rival.x - d.body.x, dy = rival.y - d.body.y, len = Math.hypot(dx, dy) || 1;
+      rivalBurn(dx / len * 30, dy / len * 30, 1, 1, true, true);
+      ai.evading = 20;
+      return true;
+    }
+    function rivalPick(p, list, keep) {   // the item around p it would meet soonest, allowing time to shift its radius
+      const k = rivalRel(p), omegaR = Math.abs(k.vt) / k.r * TIME_SCALE;
+      let best = null, bestT = Infinity;
+      for (const o of list) {
+        if (o.planet !== p) continue;
+        let gap = normAngle(Math.atan2(o.y - p.y, o.x - p.x) - k.ang) * k.s;   // how far ahead the item is
+        if (gap < 0) gap += Math.PI * 2;
+        const closing = omegaR - vCircular(p, o.distance) / o.distance * TIME_SCALE * 0.3 * k.s;
+        if (closing <= 1e-5) continue;
+        let T = gap / closing;
+        const need = Math.abs(o.distance - k.r) / 4 * 60;   // ticks to shift radius, about 4 units a second
+        if (need > T) T += (need - T) * 1.5;
+        if (o === keep) T *= 0.6;                          // stick with the current target unless clearly worse
+        if (T < bestT) { bestT = T; best = o; }
+      }
+      return best;
+    }
+    // The search is a grid over wait, heading and burn length; every candidate is simulated from the snapshot taken when
+    // planning began, and the rival coasts meanwhile so that snapshot stays exact.
+    const RIVAL_DIRS = 16;
+    function rivalStartSearch(dest) {
+      const ai = rival.ai, spare = rival.fuel - 15, cands = [];
+      const boost = [48, 100].filter(n => n <= spare);
+      const pw = boost.length ? rival.boostPower : rival.thrustPower;
+      const ns = boost.length ? boost : [160, 320];   // no booster fuel: long main-engine burns
+      for (let wait = 60; wait <= 420; wait += 30) for (let a = 0; a < RIVAL_DIRS; a++) for (const n of ns) cands.push([wait, a, n]);
+      ai.search = { dest, cands, i: 0, best: null, pw, S: snapshotWorld(), t0: ai.playT };
+    }
+    function rivalSearchStep() {   // evaluates candidates for a slice of a tick; true once the whole search is done
+      const ai = rival.ai, S = ai.search, A = S.dest.radius + 22, start = performance.now();
+      for (let k = 0; k < RIVAL_SIMS_PER_TICK && S.i < S.cands.length; k++, S.i++) {
+        if (k > 0 && performance.now() - start > RIVAL_PLAN_MS) break;   // out of time for this tick; carry on next tick
+        const [wait, a, n] = S.cands[S.i], ang = a / RIVAL_DIRS * Math.PI * 2, bx = Math.cos(ang), by = Math.sin(ang);
+        const turn = Math.abs(normAngle(Math.atan2(bx, -by) - rival.rotation)) / rival.rotationSpeed;   // ticks to face the burn
+        if (wait - (ai.playT - S.t0) < turn + 15) continue;                                           // too soon to be ready for it
+        const r = rivalSim(S.S, wait, bx, by, n, S.pw, 2000, S.dest, ai.planet);
+        if (r.crash !== undefined || r.dmin > 120 || r.dmin < S.dest.radius + 10) continue;   // a rough fly-by will do: it is corrected en route            // a usable fly-by, not a graze
+        const cost = Math.abs(r.dmin - A) * 1.0 + (wait + r.tmin) / 60 * 2.5 + n * S.pw * 0.16 + Math.max(0, r.vrel - 35) * 0.6;   // gentle arrivals save capture fuel
+        if (!S.best || cost < S.best.cost) S.best = { wait, a, bx, by, n, pw: S.pw, dmin: r.dmin, tmin: r.tmin, vrel: r.vrel, cost, turn };
+      }
+      return S.i >= S.cands.length;
+    }
+    // Mid-course correction: a short burn across the path, if it brings the fly-by closer to the planet.
+    function rivalGuide(d) {
+      const S = snapshotWorld(), A = d.radius + 22, n = 16;
+      const base = rivalSim(S, 0, 0, 0, 0, 0, 1500, d);
+      if (base.crash !== undefined || base.dmin <= A + 12) return;
+      const vx = rival.vx - d.vx, vy = rival.vy - d.vy, v = Math.hypot(vx, vy) || 1, px = -vy / v, py = vx / v;
+      let best = null;
+      for (const sgn of [1, -1]) {
+        const r = rivalSim(S, 0, px * sgn, py * sgn, n, rival.boostPower, 1500, d);
+        if (r.crash === undefined && r.dmin < base.dmin - 5 && (!best || r.dmin < best.dmin)) best = { bx: px * sgn, by: py * sgn, n, dmin: r.dmin };
+      }
+      if (best) rival.ai.corr = best;
+    }
+    function rivalThink() {
+      const ai = rival.ai, c = rival.ctl;
+      if (rival.dead || game.state !== GAME_STATE.PLAYING) { c.left = c.right = c.up = c.boost = false; return; }
+      ai.playT++;
+      if (ai.evading > 0) ai.evading--;
+      if (ai.pause > 0) ai.pause--;
+      rivalLookahead();
+      const p = ai.planet || (ai.planet = rivalHome());
+      if (ai.phase !== 'depart' && ai.phase !== 'wait' && ai.phase !== 'burn' && rivalEvade()) return;
+
+      if (ai.phase === 'sweep') {
+        if (ai.pause > 0) { c.up = false; c.boost = false; const k = rivalRel(p); rivalSteer(k.tx, k.ty, 0.2); return; }
+        const wantFuel = rival.fuel < 120 && fuels.some(f => f.planet === p);
+        const o = rivalPick(p, wantFuel ? fuels : ores, ai.target);
+        const count = q => { let n = 0; for (const z of ores) if (z.planet === q) n++; return n; };
+        const innerAt = q => ores.some(z => z.planet === q && z.distance < q.radius + 20);
+        const worth = q => Math.hypot(q.x - rival.x, q.y - rival.y) / (0.5 + count(q));   // near and rich is best
+        const open = q => q !== p && !(ai.skip[q.name] > ai.playT);
+        const nextInner = planets.filter(q => open(q) && innerAt(q)).sort((a, b) => worth(a) - worth(b));
+        const nextAny = planets.filter(q => open(q) && count(q) > 0).sort((a, b) => worth(a) - worth(b));
+        const overBudget = ai.playT - ai.arrivedT > RIVAL_BUDGET;
+        let dest = null;   // the quick inner belts first, everywhere; the slow outer belts once those are gone
+        if (!o) dest = nextAny[0] || null;
+        else if (!innerAt(p) && nextInner.length) dest = nextInner[0];
+        else if (overBudget && nextAny.length) dest = nextAny[0];
+        if (dest && ai.pause <= 0) { ai.dest = dest; ai.phase = 'depart'; rivalStartSearch(dest); c.left = c.right = c.up = c.boost = false; return; }
+        if (o) { ai.target = o; ai.R = Math.max(o.distance, p.radius + 7); }
+        rivalHold(p, ai.R || p.radius + 12, 8);
+        return;
+      }
+      if (ai.phase === 'depart') {   // coast, nose still, while planning: the plan then starts from a state the simulation knows exactly
+        c.left = c.right = c.up = c.boost = false;
+        const S = ai.search;
+        if (!rivalSearchStep()) return;
+        const elapsed = ai.playT - S.t0, best = S.best;
+        ai.search = null;
+        if (!best || best.wait - elapsed < best.turn + 2) { ai.skip[ai.dest.name] = ai.playT + 600; ai.dest = null; ai.phase = 'sweep'; return; }
+        ai.plan = best; ai.plan.wait -= elapsed; ai.t = 0; ai.burned = 0; ai.phase = 'wait';
+      }
+      if (ai.phase === 'wait') {
+        const P = ai.plan;
+        if (ai.t < P.wait) { ai.t++; c.up = false; c.boost = false; rivalSteer(P.bx, P.by, 0.1); return; }
+        ai.phase = 'burn';
+      }
+      if (ai.phase === 'burn') {
+        const P = ai.plan, aligned = rivalSteer(P.bx, P.by, 0.12), boost = P.pw === rival.boostPower;
+        c.up = aligned && !boost; c.boost = aligned && boost;
+        if (aligned) ai.burned++;
+        if (ai.burned >= P.n) { ai.phase = 'coast'; ai.t = 0; c.up = false; c.boost = false; }
+        return;
+      }
+      if (ai.phase === 'coast') {
+        const d = ai.dest, dist = Math.hypot(d.x - rival.x, d.y - rival.y);
+        c.up = false; c.boost = false;
+        if (ai.corr) {   // a correction burn in progress
+          const K = ai.corr, aligned = rivalSteer(K.bx, K.by, 0.12);
+          c.boost = aligned && rival.fuel > 0;
+          if (aligned && --K.n <= 0) ai.corr = null;
+        } else {
+          rivalSteer(rival.vx - d.vx, rival.vy - d.vy, 0.2);   // nose along its path, ready to brake
+          if (ai.t % 45 === 20 && dist > 150 && rival.fuel > 40) rivalGuide(d);
+        }
+        if (dist < Math.max(60, (d.radius + 28) * 2)) { ai.planet = d; ai.dest = null; ai.phase = 'arrive'; ai.R = d.radius + 12; ai.visits++; ai.t = 0; ai.corr = null; }
+        else if (++ai.t > 2400) {   // missed: settle at whatever is nearest
+          let q = planets[0], qd = Infinity;
+          for (const z of planets) { const e = Math.hypot(z.x - rival.x, z.y - rival.y); if (e < qd) { qd = e; q = z; } }
+          ai.planet = q; ai.dest = null; ai.phase = 'arrive'; ai.R = q.radius + 12; ai.t = 0; ai.corr = null;
+        }
+        return;
+      }
+      if (ai.phase === 'arrive') {
+        const mag = rivalHold(p, ai.R, 8);
+        if ((mag < 4 && Math.abs(ai.r - ai.R) < 6) || ++ai.t > 1800) {
+          ai.phase = 'sweep'; ai.target = null; ai.arrivedT = ai.playT; ai.pause = game.level.rival.pause || 0;
+        }
+        return;
+      }
+      rivalHold(p, ai.R || p.radius + 12, 8);
+    }
+
     // ---------- Trajectory prediction ----------
     // Simulates the rocket (and the planets) forward from the current state with no further thrust.
     // When the rocket is inside a body's sphere of influence the path is stored relative to that
@@ -652,15 +1035,15 @@
       }
       for (let i = rings.length - 1; i >= 0; i--) if (--rings[i].life <= 0) rings.splice(i, 1);
     }
-    function exhaust(boost) {
-      const dx = Math.sin(rocket.rotation), dy = -Math.cos(rocket.rotation);
+    function exhaust(boost, ship = rocket) {
+      const dx = Math.sin(ship.rotation), dy = -Math.cos(ship.rotation);
       const n = boost ? 3 : 2;
       for (let i = 0; i < n; i++) {
         const side = (Math.random() - 0.5) * 1.2;
         const speed = (boost ? 1.3 : 0.7) + Math.random() * 0.4;
-        spawnParticle(rocket.x - dx * 2.5 - dy * side, rocket.y - dy * 2.5 + dx * side,
-                      rocket.vx * TIME_SCALE - dx * speed + (Math.random() - 0.5) * 0.2,
-                      rocket.vy * TIME_SCALE - dy * speed + (Math.random() - 0.5) * 0.2,
+        spawnParticle(ship.x - dx * 2.5 - dy * side, ship.y - dy * 2.5 + dx * side,
+                      ship.vx * TIME_SCALE - dx * speed + (Math.random() - 0.5) * 0.2,
+                      ship.vy * TIME_SCALE - dy * speed + (Math.random() - 0.5) * 0.2,
                       20 + Math.random() * 20, boost ? 1.4 : 1,
                       boost ? (Math.random() < 0.5 ? '#60a5fa' : '#e0f2fe') : (Math.random() < 0.5 ? '#fb923c' : '#fde68a'));
       }
@@ -734,6 +1117,8 @@
       buildLevel(L);
       spawnRocket();
       rocket.fuel = Math.max(rocket.fuel, L.startFuel || START_FUEL);
+      setupRival(L);
+      game.raceTotal = ores.length;
       const home = homePlanet();
       camera.follow = true; camera.zoomMul = 1; camera.scale = L.nearZoom || NEAR_ZOOM; camera.shake = 0;
       camera.focusX = home.x; camera.focusY = home.y;
@@ -754,17 +1139,33 @@
     function goalMet() {
       const g = game.level.goal;
       if (g.type === 'ore') return game.ore >= g.count;
+      if (g.type === 'race') return game.ore * 2 > game.raceTotal;   // more than half: the rival can no longer catch up
       return planets.every(p => p.collected > 0);
     }
     function goalProgress() {
       const g = game.level.goal;
       if (g.type === 'ore') return game.ore / g.count;
+      if (g.type === 'race') return game.ore / (Math.floor(game.raceTotal / 2) + 1);
       return planets.filter(p => p.collected > 0).length / planets.length;
     }
     function goalText() {
       const g = game.level.goal;
       if (g.type === 'ore') return `ORE  ${game.ore} / ${g.count}`;
+      if (g.type === 'race') return `YOU  ${game.ore}     ${rival.name}  ${rival.ore}     ·   ${ores.length} LEFT`;
       return planets.map(p => (p.collected > 0 ? '✓ ' : '○ ') + p.name.toUpperCase()).join('   ');
+    }
+    // Race levels end as soon as the outcome is settled. True when this call ended the level.
+    function raceCheck() {
+      if (game.level.goal.type !== 'race' || game.state !== GAME_STATE.PLAYING) return false;
+      const total = game.raceTotal;
+      if (game.ore * 2 > total) { completeLevel(); return true; }
+      if (rival.ore * 2 > total) { endGame('Out-mined by the rival'); return true; }
+      if (ores.length === 0) { raceFinish(); return true; }
+      return false;
+    }
+    function raceFinish() {   // no ore left, or time up: whoever holds more wins; a tie goes to the rival
+      if (game.ore > rival.ore) completeLevel();
+      else endGame(game.ore === rival.ore ? 'Tied with the rival' : 'Out-mined by the rival');
     }
     function oresLeft(p) { let n = 0; for (const o of ores) if (o.planet === p) n++; return n; }
     function findTarget() {
@@ -781,7 +1182,7 @@
 
     function completeLevel() {
       const timeBonus = Math.floor(game.timeLeft) * TIME_BONUS_PER_SECOND;
-      game.stats = { ore: game.ore, timeLeft: game.timeLeft, timeBonus, levelBonus: LEVEL_BONUS };
+      game.stats = { ore: game.ore, timeLeft: game.timeLeft, timeBonus, levelBonus: LEVEL_BONUS, rivalOre: rival.active ? rival.ore : undefined };
       game.score += timeBonus + LEVEL_BONUS;
       game.lives = Math.min(MAX_LIVES, game.lives + 1);
       updateHighScore();
@@ -905,7 +1306,7 @@
       }
       const hot = game.timeLeft < 30;
       if (hot !== game.hot) { game.hot = hot; OrbitalAudio.setIntensity(hot ? 1 : 0); }
-      if (game.timeLeft <= 0) { game.timeLeft = 0; endGame('Out of time'); }
+      if (game.timeLeft <= 0) { game.timeLeft = 0; if (game.level.goal.type === 'race') raceFinish(); else endGame('Out of time'); }
     }
     function updateCombo() {
       if (game.comboTimer > 0 && --game.comboTimer === 0) game.combo = 0;
@@ -1190,14 +1591,18 @@
     }
 
     function drawTrail() {
-      if (trail.length < 4) return;
+      drawTrailOf(trail, trailFrame, '255,255,255', 0.35);
+      if (rival.active && !rival.dead) drawTrailOf(rival.trail, rival.trailFrame, '244,114,182', 0.3);
+    }
+    function drawTrailOf(T, frame, rgb, alpha) {
+      if (T.length < 4) return;
       ctx.save();
-      if (trailFrame) ctx.translate(trailFrame.x, trailFrame.y);   // the trail moves with the body it was flown around
+      if (frame) ctx.translate(frame.x, frame.y);   // the trail moves with the body it was flown around
       ctx.lineWidth = 1 / camera.scale;
-      const n = trail.length / 2;
-      for (let i = 2; i < trail.length; i += 2) {
-        ctx.strokeStyle = `rgba(255,255,255,${0.35 * (i / 2) / n})`;
-        ctx.beginPath(); ctx.moveTo(trail[i - 2], trail[i - 1]); ctx.lineTo(trail[i], trail[i + 1]); ctx.stroke();
+      const n = T.length / 2;
+      for (let i = 2; i < T.length; i += 2) {
+        ctx.strokeStyle = `rgba(${rgb},${alpha * (i / 2) / n})`;
+        ctx.beginPath(); ctx.moveTo(T[i - 2], T[i - 1]); ctx.lineTo(T[i], T[i + 1]); ctx.stroke();
       }
       ctx.restore();
     }
@@ -1237,13 +1642,14 @@
     }
 
     // Rocket in local units, nose pointing +x.
-    function drawRocketShape(thrusting, boosting, flat) {
+    const ROCKET_PALETTE = { body: '#e5e7eb', nose: '#4fc3f7', fin: '#ef4444' };
+    function drawRocketShape(thrusting, boosting, flat, pal = ROCKET_PALETTE) {
       ctx.beginPath(); ctx.moveTo(4.5, 0); ctx.lineTo(-2.5, -2.2); ctx.lineTo(-2.5, 2.2); ctx.closePath();
-      ctx.fillStyle = flat ? 'white' : '#e5e7eb'; ctx.fill();
+      ctx.fillStyle = flat ? 'white' : pal.body; ctx.fill();
       if (!flat) {
         ctx.beginPath(); ctx.moveTo(4.5, 0); ctx.lineTo(1.5, -0.95); ctx.lineTo(1.5, 0.95); ctx.closePath();
-        ctx.fillStyle = '#4fc3f7'; ctx.fill();
-        ctx.fillStyle = '#ef4444';
+        ctx.fillStyle = pal.nose; ctx.fill();
+        ctx.fillStyle = pal.fin;
         ctx.beginPath(); ctx.moveTo(-2.5, -2.2); ctx.lineTo(-3.6, -3.3); ctx.lineTo(-1.4, -1.9); ctx.closePath(); ctx.fill();
         ctx.beginPath(); ctx.moveTo(-2.5, 2.2); ctx.lineTo(-3.6, 3.3); ctx.lineTo(-1.4, 1.9); ctx.closePath(); ctx.fill();
         ctx.fillStyle = '#1e3a8a'; ctx.beginPath(); ctx.arc(0.5, 0, 0.7, 0, Math.PI * 2); ctx.fill();
@@ -1273,6 +1679,14 @@
       ctx.restore();
       ctx.globalAlpha = 1;
     }
+    function drawRival() {
+      if (!rival.active || rival.dead) return;
+      ctx.save();
+      ctx.translate(rival.x, rival.y);
+      ctx.rotate(rival.rotation - Math.PI / 2);
+      drawRocketShape(rival.thrusting, rival.boosting, false, RIVAL_PALETTE);
+      ctx.restore();
+    }
 
     // ---------- Rendering: screen space ----------
     function drawPopups() {
@@ -1288,22 +1702,32 @@
     }
 
     function drawTargetArrow() {
+      if (rocket.dead) return;
       const target = findTarget();
-      if (!target || rocket.dead) return;
-      const s = worldToScreen(target.x, target.y);
-      const margin = 48;
-      if (s.x > margin && s.x < W - margin && s.y > margin && s.y < H - margin) return;
+      if (target) drawEdgeArrow(target.x, target.y, target.color, `${target.name.toUpperCase()} ${Math.round(Math.hypot(target.x - rocket.x, target.y - rocket.y))}`, 48);
+      if (rival.active && !rival.dead) drawEdgeArrow(rival.x, rival.y, rival.color, `${rival.name} ${Math.round(Math.hypot(rival.x - rocket.x, rival.y - rocket.y))}`, 64);
+    }
+    // An arrow at the screen edge pointing at an off-screen world point; nothing is drawn while the point is in view.
+    function drawEdgeArrow(x, y, color, label, margin) {
+      const s = worldToScreen(x, y), bottom = margin + 70;   // keep clear of the console along the bottom
+      if (s.x > margin && s.x < W - margin && s.y > margin && s.y < H - bottom) return;
       const cx = W / 2, cy = H / 2, dx = s.x - cx, dy = s.y - cy;
       const ang = Math.atan2(dy, dx);
-      const k = Math.min((W / 2 - margin) / Math.max(Math.abs(dx), 1e-6), (H / 2 - margin) / Math.max(Math.abs(dy), 1e-6));
+      const k = Math.min((W / 2 - margin) / Math.max(Math.abs(dx), 1e-6), (H / 2 - (dy > 0 ? bottom : margin)) / Math.max(Math.abs(dy), 1e-6));
       const ax = cx + dx * k, ay = cy + dy * k;
       ctx.save(); ctx.translate(ax, ay); ctx.rotate(ang);
-      ctx.fillStyle = target.color;
+      ctx.fillStyle = color;
       ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -9); ctx.lineTo(-4, 0); ctx.lineTo(-8, 9); ctx.closePath(); ctx.fill();
       ctx.restore();
-      const dist = Math.hypot(target.x - rocket.x, target.y - rocket.y);
       ctx.fillStyle = 'white'; ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(`${target.name.toUpperCase()} ${Math.round(dist)}`, ax - Math.cos(ang) * 40, ay - Math.sin(ang) * 40);
+      ctx.fillText(label, ax - Math.cos(ang) * 40, ay - Math.sin(ang) * 40);
+    }
+    function drawRivalLabel() {   // its name floats over the rival's ship while it is in view
+      if (!rival.active || rival.dead) return;
+      const s = worldToScreen(rival.x, rival.y);
+      if (s.x < 0 || s.x > W || s.y < 0 || s.y > H) return;
+      ctx.fillStyle = rgba(rival.color, 0.85); ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+      ctx.fillText(rival.name, s.x, s.y - 6 - 3 * camera.scale);
     }
 
     // ---------- Console: on-screen buttons with their hotkeys ----------
@@ -1416,6 +1840,15 @@
       ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(x, y, w, h);
       ctx.fillStyle = color; ctx.fillRect(x, y, w * clamp(frac, 0, 1), h);
     }
+    function drawRaceBar(x, y, w, h) {   // your share grows from the left, the rival's from the right; past the post in the middle wins outright
+      const total = Math.max(1, game.raceTotal);
+      ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(x, y, w, h);
+      ctx.fillStyle = '#facc15'; ctx.fillRect(x, y, w * clamp(game.ore / total, 0, 1), h);
+      const rw = w * clamp(rival.ore / total, 0, 1);
+      const flash = game.ticks - rival.lastOreTick < 40 && game.ticks % 10 < 5;
+      ctx.fillStyle = flash ? '#ffffff' : rival.color; ctx.fillRect(x + w - rw, y, rw, h);
+      ctx.fillStyle = 'white'; ctx.fillRect(x + w / 2 - 1, y - 2, 2, h + 4);
+    }
 
     function drawHUD() {
       const L = game.level;
@@ -1427,7 +1860,7 @@
       ctx.fillText(`LEVEL ${game.levelIndex + 1}  ·  ${L.name}`, 16, 14);
       ctx.fillStyle = 'white'; ctx.font = '14px monospace';
       ctx.fillText(goalText(), 16, 40);
-      bar(16, 62, 220, 6, goalProgress(), '#facc15');
+      if (L.goal.type === 'race') drawRaceBar(16, 62, 220, 6); else bar(16, 62, 220, 6, goalProgress(), '#facc15');
       // Timer
       ctx.textAlign = 'center';
       const low = game.timeLeft <= 15 && game.state === GAME_STATE.PLAYING;
@@ -1496,6 +1929,9 @@
           ctx.beginPath(); ctx.arc(cx + p.x * k, cy + p.y * k, 6, 0, Math.PI * 2); ctx.stroke();
         }
       }
+      if (rival.active && !rival.dead) {
+        ctx.fillStyle = rival.color; ctx.beginPath(); ctx.arc(cx + rival.x * k, cy + rival.y * k, 2.2, 0, Math.PI * 2); ctx.fill();
+      }
       if (!rocket.dead) {
         ctx.fillStyle = 'white'; ctx.beginPath(); ctx.arc(cx + rocket.x * k, cy + rocket.y * k, 2, 0, Math.PI * 2); ctx.fill();
       }
@@ -1542,10 +1978,11 @@
       ctx.globalAlpha = a; ctx.textBaseline = 'middle';
       ctx.textAlign = 'center';
       ctx.fillStyle = '#4ade80'; ctx.font = 'bold 60px SpaceFont, Arial';
-      ctx.fillText('LEVEL COMPLETE', W / 2, H / 2 - 110);
+      ctx.fillText(s.rivalOre !== undefined ? 'RIVAL BEATEN' : 'LEVEL COMPLETE', W / 2, H / 2 - 110);
       ctx.font = '18px monospace';
       const rows = [
         ['ORE COLLECTED', `${s.ore}`],
+        ...(s.rivalOre !== undefined ? [['RIVAL ORE', `${s.rivalOre}`]] : []),
         [`TIME BONUS  (${formatTime(s.timeLeft)} left)`, `+${s.timeBonus}`],
         ['LEVEL BONUS', `+${s.levelBonus}`],
         ['EXTRA LIFE', '+1'],
@@ -1715,6 +2152,7 @@
       if (levelBelts(sel).length) tags.push('ASTEROIDS');
       if (sel.battery) tags.push('BATTERY');
       if (sel.noNav) tags.push('NO NAV AI');
+      if (sel.rival) tags.push('RIVAL');
       ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.font = '13px monospace';
       ctx.fillText(tags.join('   ·   '), W / 2, H - 120);
       // buttons
@@ -1741,9 +2179,11 @@
       }
       if (S === GAME_STATE.PLAYING) {
         handleInput(); updatePower();
+        if (rival.active) { rivalThink(); rivalInput(); }
         stepWorld();
         if (!rocket.dead) { checkCollisions(); collectItems(); }
-        if (game.state === GAME_STATE.PLAYING) { updateTimer(); updateCombo(); handleRespawn(); }
+        if (rival.active && !rival.dead && game.state === GAME_STATE.PLAYING) { rivalCollisions(); rivalCollect(); }
+        if (game.state === GAME_STATE.PLAYING) { updateTimer(); updateCombo(); handleRespawn(); rivalRespawn(); }
         computePrediction(); updateCamera(); syncEngineAudio();
         return;
       }
@@ -1768,9 +2208,11 @@
       drawTrail();
       drawPrediction();
       drawParticles();
+      drawRival();
       drawRocket();
 
       ctx.setTransform(1, 0, 0, 1, 0, 0);
+      drawRivalLabel();
       drawPopups();
       drawTargetArrow();
       drawHUD();
