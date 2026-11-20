@@ -2,11 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Orbital</title>
   <style>
     body { margin: 0; background: #02030a; overflow: hidden; }
-    canvas { display: block; cursor: grab; }
+    canvas { display: block; cursor: grab; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
     @font-face {
       font-family: 'SpaceFont';
       src: url('https://fonts.gstatic.com/s/quantico/v15/rax5HiSdp9cPL3km3mujm9_1kw.woff2') format('woff2');
@@ -380,6 +380,7 @@
       nav: true,                  // nav AI switched on (only matters on battery levels)
       inRun: false,               // a run is in progress (score and lives carry across the star map)
       raceTotal: 0,               // ore in play on a race level
+      abandonArmed: 0,            // ticks left in which a second tap on ABANDON ends the run (touch)
     };
     let highScore = parseInt(localStorage.getItem('orbitalHighScore')) || 0;
     let maxLevelReached = parseInt(localStorage.getItem('orbitalMaxLevel')) || 0;   // index of the furthest level unlocked
@@ -1282,8 +1283,8 @@
       const n = LEVELS.length, rows = n > 14 ? 3 : 2, cols = Math.ceil(n / rows);
       const row = Math.floor(i / cols), k = i - row * cols;
       const c = row % 2 === 0 ? k : cols - 1 - k;
-      const rowY = rows === 3 ? [0.28, 0.47, 0.66] : [0.40, 0.64];
-      return { x: W * (0.12 + 0.76 * c / Math.max(1, cols - 1)), y: H * rowY[row] + 14 * Math.sin(i * 2.1) };
+      const short = H < 520, rowY = rows === 3 ? (short ? [0.22, 0.36, 0.50] : [0.28, 0.47, 0.66]) : (short ? [0.30, 0.50] : [0.40, 0.64]);
+      return { x: W * (0.12 + 0.76 * c / Math.max(1, cols - 1)), y: H * rowY[row] + (short ? 6 : 14) * Math.sin(i * 2.1) };
     }
     function mapStarStyle(i) { return Object.assign({}, DEFAULT_STAR, LEVELS[i].star || {}); }
     function travelPos(T, k) {   // a gentle arc between two systems
@@ -1474,12 +1475,15 @@
 
     function handleInput() {
       if (rocket.dead) return;
-      const left = keys['ArrowLeft'] || keys['a'];
-      const right = keys['ArrowRight'] || keys['d'];
-      const up = keys['ArrowUp'] || keys['w'];
+      let turn = (keys['ArrowRight'] || keys['d'] ? 1 : 0) - (keys['ArrowLeft'] || keys['a'] ? 1 : 0);
+      let up = keys['ArrowUp'] || keys['w'];
+      if (joy.id !== null) {   // the touch stick: sideways turns in proportion to the push, forward thrusts
+        const t = joy.dx / 0.6;
+        if (Math.abs(t) > 0.15) turn = clamp(t, -1, 1);
+        if (joy.dy < -0.35) up = true;
+      }
       const boost = keys[' '] || ui.boost;
-      if (left) rocket.rotation -= rocket.rotationSpeed;
-      if (right) rocket.rotation += rocket.rotationSpeed;
+      rocket.rotation += rocket.rotationSpeed * turn;
       const dx = Math.sin(rocket.rotation), dy = -Math.cos(rocket.rotation);
       rocket.thrusting = !!up;
       rocket.boosting = !!boost && rocket.fuel > 0;
@@ -1581,10 +1585,13 @@
         }
         if (S === GAME_STATE.LEVEL_INTRO) {
           if (hit(introButton, x, y) || buttonAt(x, y)) { beginPlay(); return true; }
+          if (hit(introBack, x, y)) { introBack.press(); return true; }
           return false;
         }
+        if (S === GAME_STATE.LEVEL_COMPLETE) { if (game.stateTimer > 45) nextLevel(); return true; }       // a tap or click moves on, like SPACE
+        if (S === GAME_STATE.GAME_OVER || S === GAME_STATE.WIN) { if (game.stateTimer > 90) toWelcome(); return true; }
         if (S !== GAME_STATE.PLAYING) return false;
-        const b = buttonAt(x, y);
+        const b = buttonAt(x, y) || hudLinkAt(x, y);
         if (!b) return false;
         pressedButton = b; b.press();
         return true;
@@ -1614,13 +1621,33 @@
       });
       canvas.addEventListener('mouseup', () => { isDragging = false; releasePress(); });
       canvas.addEventListener('mouseleave', () => { isDragging = false; releasePress(); hoverButton = null; });
+      // Touch: each finger is tracked by its identifier, so the stick and a button can be held at once.
       canvas.addEventListener('touchstart', e => {
-        unlockAudio();
-        const t = e.changedTouches[0];
-        if (t && pressAt(t.clientX, t.clientY)) e.preventDefault();
+        unlockAudio(); touchUI = true;
+        for (const t of e.changedTouches) {
+          const x = t.clientX, y = t.clientY;
+          if (game.state === GAME_STATE.PLAYING) {
+            if (joy.id === null && joyHit(x, y)) { joy.id = t.identifier; joyMove(x, y); continue; }
+            const b = buttonAt(x, y) || hudLinkAt(x, y);
+            if (b) { b.press(); touchButtons.set(t.identifier, b); }
+          } else pressAt(x, y);
+        }
+        e.preventDefault();   // no scrolling, zooming or simulated mouse clicks from the canvas
       }, { passive: false });
-      canvas.addEventListener('touchend', releasePress);
-      canvas.addEventListener('touchcancel', releasePress);
+      canvas.addEventListener('touchmove', e => {
+        for (const t of e.changedTouches) if (t.identifier === joy.id) joyMove(t.clientX, t.clientY);
+        e.preventDefault();
+      }, { passive: false });
+      const touchEnd = e => {
+        for (const t of e.changedTouches) {
+          if (t.identifier === joy.id) joyRelease();
+          const b = touchButtons.get(t.identifier);
+          if (b) { b.release(); touchButtons.delete(t.identifier); }
+        }
+      };
+      canvas.addEventListener('touchend', touchEnd);
+      canvas.addEventListener('touchcancel', touchEnd);
+      window.addEventListener('blur', () => { joyRelease(); for (const b of touchButtons.values()) b.release(); touchButtons.clear(); });
 
       document.addEventListener('keydown', e => {
         unlockAudio();
@@ -1919,11 +1946,16 @@
     for (const b of buttons) Object.assign(b, { x: 0, y: 0, w: 0, h: 0, visible: false });
     const BUTTON_W = 160, BUTTON_H = 44, BUTTON_GAP = 14;
 
-    function layoutButtons() {   // centred along the bottom; battery controls only appear on battery levels
+    function layoutButtons() {   // centred along the bottom, or a column under the right thumb on touch screens; battery controls only appear on battery levels
       const show = game.level && game.level.battery ? buttons : buttons.slice(0, 1);
+      for (const b of buttons) b.visible = false;
+      if (touchUI) {
+        let y = H - 16 - 48;   // the booster lowest, where the thumb rests
+        for (const b of show) { b.x = W - 16 - 150; b.y = y; b.w = 150; b.h = 48; b.visible = true; y -= 48 + 12; }
+        return;
+      }
       const total = show.length * BUTTON_W + (show.length - 1) * BUTTON_GAP;
       let x = Math.round(W / 2 - total / 2);
-      for (const b of buttons) b.visible = false;
       for (const b of show) { b.x = x; b.y = H - 16 - BUTTON_H; b.w = BUTTON_W; b.h = BUTTON_H; b.visible = true; x += BUTTON_W + BUTTON_GAP; }
     }
     function hit(b, x, y) { return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
@@ -1931,6 +1963,56 @@
       for (const b of buttons) if (b.visible && hit(b, x, y)) return b;
       return null;
     }
+
+    // ---------- Touch controls ----------
+    // Phones and tablets get a joystick under the left thumb (push forward to thrust, sideways to turn, in proportion)
+    // and the console under the right thumb; the booster stays a button. Small chips stand in for the M, F and X keys.
+    let touchUI = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);   // also switched on by the first touch
+    const JOY_R = 56, JOY_KNOB = 22;
+    const joy = { id: null, dx: 0, dy: 0 };   // the finger on the stick, and the knob's offset as a fraction of JOY_R
+    const touchButtons = new Map();            // touch identifier -> the button that finger is holding
+    function joyCenter() { return { x: 24 + JOY_R, y: H - 24 - JOY_R }; }
+    function joyHit(x, y) { const c = joyCenter(); return Math.hypot(x - c.x, y - c.y) <= JOY_R * 1.6; }
+    function joyMove(x, y) {
+      const c = joyCenter();
+      let dx = (x - c.x) / JOY_R, dy = (y - c.y) / JOY_R;
+      const m = Math.hypot(dx, dy);
+      if (m > 1) { dx /= m; dy /= m; }
+      joy.dx = dx; joy.dy = dy;
+    }
+    function joyRelease() { joy.id = null; joy.dx = 0; joy.dy = 0; }
+    function drawJoystick() {
+      const c = joyCenter(), active = joy.id !== null;
+      ctx.save();
+      ctx.lineWidth = 2; ctx.strokeStyle = active ? 'rgba(79,195,247,0.6)' : 'rgba(255,255,255,0.25)'; ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      ctx.beginPath(); ctx.arc(c.x, c.y, JOY_R, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';   // forward is thrust: a small arrow at the top of the ring
+      ctx.beginPath(); ctx.moveTo(c.x, c.y - JOY_R + 7); ctx.lineTo(c.x - 6, c.y - JOY_R + 17); ctx.lineTo(c.x + 6, c.y - JOY_R + 17); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = active ? 'rgba(79,195,247,0.7)' : 'rgba(255,255,255,0.3)';
+      ctx.beginPath(); ctx.arc(c.x + joy.dx * JOY_R, c.y + joy.dy * JOY_R, JOY_KNOB, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+    const hudLinks = [   // tappable stand-ins for the M, F and X keys, drawn as chips under the objective
+      { id: 'music', label: () => `MUSIC ${OrbitalAudio.isMuted() ? 'OFF' : 'ON'}`, press() { OrbitalAudio.toggleMute(); }, release() {} },
+      { id: 'follow', label: () => `FOLLOW ${camera.follow ? 'ON' : 'OFF'}`, press() { camera.follow = !camera.follow; }, release() {} },
+      { id: 'abandon', label: () => game.abandonArmed > 0 ? 'TAP AGAIN TO ABANDON' : 'ABANDON',
+        press() { if (game.abandonArmed > 0) endGame('Run abandoned'); else game.abandonArmed = 150; }, release() {} },
+    ];
+    for (const l of hudLinks) Object.assign(l, { x: 0, y: 0, w: 0, h: 22 });
+    function hudLinkAt(x, y) { return touchUI ? hudLinks.find(l => hit(l, x, y)) || null : null; }
+    function drawHudLinks(x, y) {
+      ctx.font = 'bold 11px monospace'; ctx.textBaseline = 'middle'; ctx.textAlign = 'center'; ctx.lineWidth = 1;
+      for (const l of hudLinks) {
+        const text = l.label(), w = ctx.measureText(text).width + 16;
+        l.x = x; l.y = y; l.w = w;
+        roundRectPath(l.x, l.y, l.w, l.h, 5);
+        ctx.fillStyle = l.id === 'abandon' && game.abandonArmed > 0 ? 'rgba(255,82,82,0.35)' : 'rgba(255,255,255,0.1)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.fillText(text, l.x + w / 2, l.y + l.h / 2 + 1);
+        x += w + 8;
+      }
+    }
+    const introBack = { x: 0, y: 0, w: 0, h: 0, press() { if (game.levelIndex < 0) openCustom(); else openMap(game.levelIndex); } };   // the way back from the intro card
     const introButton = { id: 'launch', label: 'LAUNCH', key: 'SPACE', color: '#4fc3f7', x: 0, y: 0, w: 190, h: 48,
                           press() { beginPlay(); }, release() {}, active: () => false, enabled: () => true };
     const mapButtons = [
@@ -1985,30 +2067,32 @@
       ctx.textBaseline = 'top';
       for (const b of buttons) {
         if (!b.visible) continue;
-        const gy = b.y - 32;   // gauge row above the button
+        const left = touchUI;   // the gauge sits above its button, or beside it when the buttons form a column
+        const gw = left ? 150 : b.w, gx = left ? b.x - 12 - gw : b.x, gy = left ? b.y + 7 : b.y - 32;
         ctx.font = '12px monospace'; ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,0.7)';
         if (b.id === 'boost') {
-          ctx.fillText(`FUEL ${Math.floor(rocket.fuel)}`, b.x, gy);
-          bar(b.x, gy + 18, b.w, 6, rocket.fuel / 500, rocket.fuel > 0 ? '#4ade80' : '#ef4444');
+          ctx.fillText(`FUEL ${Math.floor(rocket.fuel)}`, gx, gy);
+          bar(gx, gy + 18, gw, 6, rocket.fuel / 500, rocket.fuel > 0 ? '#4ade80' : '#ef4444');
         } else if (b.id === 'nav') {
-          ctx.fillText(`BATTERY ${Math.round(rocket.battery)}%`, b.x, gy);
+          ctx.fillText(`BATTERY ${Math.round(rocket.battery)}%`, gx, gy);
           const rate = powerRate(), txt = `${rate >= 0 ? '+' : ''}${rate.toFixed(Math.abs(rate) >= 10 ? 0 : 1)}/s`;
           ctx.textAlign = 'right'; ctx.fillStyle = rate >= 0 ? '#4ade80' : '#f87171';
-          ctx.fillText(txt, b.x + b.w, gy);
-          drawSunIcon(b.x + b.w - ctx.measureText(txt).width - 12, gy + 6, clamp(solarRate() / NAV_DRAIN, 0, 1));
+          ctx.fillText(txt, gx + gw, gy);
+          if (!left) drawSunIcon(gx + gw - ctx.measureText(txt).width - 12, gy + 6, clamp(solarRate() / NAV_DRAIN, 0, 1));
           const low = rocket.battery < 20;
-          bar(b.x, gy + 18, b.w, 6, rocket.battery / BATTERY_MAX, low && game.ticks % 30 < 15 ? '#ff5252' : low ? '#f87171' : '#4fc3f7');
+          bar(gx, gy + 18, gw, 6, rocket.battery / BATTERY_MAX, low && game.ticks % 30 < 15 ? '#ff5252' : low ? '#f87171' : '#4fc3f7');
         } else if (b.id === 'charge') {
           ctx.fillStyle = 'rgba(255,255,255,0.5)';
-          ctx.fillText(`HOLD: ${CHARGE_FUEL_COST} FUEL \u2192 1% CHARGE`, b.x, gy);
+          ctx.fillText(left ? `${CHARGE_FUEL_COST} FUEL \u2192 1% CHARGE` : `HOLD: ${CHARGE_FUEL_COST} FUEL \u2192 1% CHARGE`, gx, gy);
         }
         drawButton(b);
       }
       if (game.level.noNav) {
         const b = buttons[0];
-        ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.font = 'bold 13px monospace';
+        ctx.textBaseline = 'middle'; ctx.font = 'bold 13px monospace';
         ctx.fillStyle = game.ticks % 40 < 28 ? '#ff5252' : 'rgba(255,82,82,0.4)';
-        ctx.fillText('NAV AI OFFLINE', b.x + b.w + 18, b.y + b.h / 2);
+        if (touchUI) { ctx.textAlign = 'right'; ctx.fillText('NAV AI OFFLINE', b.x + b.w, b.y - 14); }
+        else { ctx.textAlign = 'left'; ctx.fillText('NAV AI OFFLINE', b.x + b.w + 18, b.y + b.h / 2); }
       }
     }
 
@@ -2032,8 +2116,10 @@
     function drawRaceStatus(x, y) {   // your tally, then each rival's in its own colour
       ctx.textAlign = 'left'; ctx.font = '14px monospace';
       const put = (txt, color) => { ctx.fillStyle = color; ctx.fillText(txt, x, y); x += ctx.measureText(txt).width; };
+      const full = `YOU  ${game.ore}` + rivals.map(r => `     ${r.name}  ${r.ore}`).join('') + `     ·   ${ores.length} LEFT`;
+      const compact = ctx.measureText(full).width > W / 2 - 70 - x;   // keep clear of the timer on narrow screens
       put(`YOU  ${game.ore}`, 'white');
-      for (const r of rivals) put(`     ${r.name}  ${r.ore}`, r.color);
+      for (const r of rivals) put(`     ${compact && rivals.length > 1 ? 'R' + (r.index + 1) : r.name}  ${r.ore}`, r.color);
       put(`     ·   ${ores.length} LEFT`, 'rgba(255,255,255,0.7)');
     }
 
@@ -2082,18 +2168,22 @@
       if (game.state === GAME_STATE.PLAYING && game.ticks < 900 && L.hint) {
         ctx.globalAlpha = clamp((900 - game.ticks) / 120, 0, 1);
         ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.font = '14px monospace';
-        ctx.fillText(L.hint, W / 2, H - 112);
+        ctx.fillText(L.hint, W / 2, touchUI ? 118 : H - 112);   // above the console, or under the objective when the console is a column
         ctx.globalAlpha = 1;
       }
-      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-      ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace';
-      ctx.fillText(`M  music ${OrbitalAudio.isMuted() ? 'off' : 'on'}  ·  F  follow ${camera.follow ? 'on' : 'off'}  ·  X  abandon`, 16, 78);
+      if (touchUI) drawHudLinks(16, 76);
+      else {
+        ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+        ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace';
+        ctx.fillText(`M  music ${OrbitalAudio.isMuted() ? 'off' : 'on'}  ·  F  follow ${camera.follow ? 'on' : 'off'}  ·  X  abandon`, 16, 78);
+      }
       drawConsole();
+      if (touchUI && game.state === GAME_STATE.PLAYING) drawJoystick();
       ctx.restore();
     }
 
     function drawMinimap() {
-      const size = 150, pad = 16, cx = W - pad - size / 2, cy = H - pad - size / 2;
+      const size = touchUI ? 110 : 150, pad = 16, cx = W - pad - size / 2, cy = touchUI ? 112 + size / 2 : H - pad - size / 2;   // under the lives on touch screens, out of the thumb's way
       let range = 0;
       for (const p of planets) range = Math.max(range, p.distance);
       for (const A of levelBelts(game.level)) range = Math.max(range, A.outer);
@@ -2135,39 +2225,44 @@
 
     function drawLevelIntro() {
       const L = game.level, a = clamp(game.stateTimer / 20, 0, 1);
+      const k = clamp(H / 640, 0.6, 1), f = Math.max(0.72, k), px = size => `${Math.round(size * f)}px`;   // short screens pack the card tighter
       overlay(0.55 * a);
       ctx.globalAlpha = a; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '20px SpaceFont, Arial';
-      ctx.fillText(game.levelIndex < 0 ? 'CUSTOM SYSTEM' : `LEVEL ${game.levelIndex + 1} OF ${LEVELS.length}`, W / 2, H / 2 - 120);
-      ctx.fillStyle = '#4fc3f7'; ctx.font = 'bold 60px SpaceFont, Arial';
-      ctx.fillText(L.name, W / 2, H / 2 - 60);
-      ctx.fillStyle = 'white'; ctx.font = '20px monospace';
-      ctx.fillText(L.brief, W / 2, H / 2 + 10);
-      ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '15px monospace';
-      ctx.fillText(L.hint, W / 2, H / 2 + 45);
-      ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '14px monospace';
-      ctx.fillText(`TIME LIMIT ${formatTime(L.time)}   ·   LIVES ${game.lives}`, W / 2, H / 2 + 80);
-      let y = H / 2 + 140;
+      ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = `${px(20)} SpaceFont, Arial`;
+      ctx.fillText(game.levelIndex < 0 ? 'CUSTOM SYSTEM' : `LEVEL ${game.levelIndex + 1} OF ${LEVELS.length}`, W / 2, H / 2 - 120 * k);
+      ctx.fillStyle = '#4fc3f7'; ctx.font = `bold ${px(60)} SpaceFont, Arial`;
+      ctx.fillText(L.name, W / 2, H / 2 - 60 * k);
+      ctx.fillStyle = 'white'; ctx.font = `${px(20)} monospace`;
+      ctx.fillText(L.brief, W / 2, H / 2 + 10 * k);
+      ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = `${px(15)} monospace`;
+      ctx.fillText(L.hint, W / 2, H / 2 + 45 * k);
+      ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = `${px(14)} monospace`;
+      ctx.fillText(`TIME LIMIT ${formatTime(L.time)}   ·   LIVES ${game.lives}`, W / 2, H / 2 + 80 * k);
+      let y = H / 2 + 140 * k;
       if (L.notes) {   // new mechanics introduced on this level
-        ctx.fillStyle = '#facc15'; ctx.font = '14px monospace';
-        L.notes.forEach((line, i) => ctx.fillText(line, W / 2, H / 2 + 112 + i * 20));
-        y += L.notes.length * 20 + 4;
+        ctx.fillStyle = '#facc15'; ctx.font = `${px(14)} monospace`;
+        L.notes.forEach((line, i) => ctx.fillText(line, W / 2, H / 2 + 112 * k + i * 20 * f));
+        y += L.notes.length * 20 * f + 4;
       }
       introButton.x = W / 2 - introButton.w / 2; introButton.y = y - introButton.h / 2;
       drawButton(introButton);
-      ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('ESC  star map', W / 2, y + 44);
+      const backText = game.levelIndex < 0 ? (touchUI ? 'BACK TO THE BUILDER' : 'ESC  builder') : (touchUI ? 'BACK TO THE STAR MAP' : 'ESC  star map');
+      ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      introBack.w = ctx.measureText(backText).width + 24; introBack.h = 26; introBack.x = W / 2 - introBack.w / 2; introBack.y = y + 44 - 13;
+      if (touchUI) { roundRectPath(introBack.x, introBack.y, introBack.w, introBack.h, 6); ctx.fillStyle = 'rgba(255,255,255,0.1)'; ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; ctx.stroke(); }
+      ctx.fillStyle = touchUI ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.45)';
+      ctx.fillText(backText, W / 2, y + 44);
       ctx.globalAlpha = 1;
     }
 
     function drawLevelComplete() {
-      const s = game.stats, a = clamp(game.stateTimer / 20, 0, 1);
+      const s = game.stats, a = clamp(game.stateTimer / 20, 0, 1), short = H < 520;
       overlay(0.6 * a);
       ctx.globalAlpha = a; ctx.textBaseline = 'middle';
       ctx.textAlign = 'center';
-      ctx.fillStyle = '#4ade80'; ctx.font = 'bold 60px SpaceFont, Arial';
-      ctx.fillText(s.rivalOres.length > 1 ? 'RIVALS BEATEN' : s.rivalOres.length ? 'RIVAL BEATEN' : 'LEVEL COMPLETE', W / 2, H / 2 - 110);
-      ctx.font = '18px monospace';
+      ctx.fillStyle = '#4ade80'; ctx.font = `bold ${short ? 44 : 60}px SpaceFont, Arial`;
+      ctx.fillText(s.rivalOres.length > 1 ? 'RIVALS BEATEN' : s.rivalOres.length ? 'RIVAL BEATEN' : 'LEVEL COMPLETE', W / 2, H / 2 - (short ? 92 : 110));
+      ctx.font = `${short ? 15 : 18}px monospace`;
       const rows = [
         ['ORE COLLECTED', `${s.ore}`],
         ...s.rivalOres.map(r => [`${r.name} ORE`, `${r.ore}`]),
@@ -2177,12 +2272,12 @@
         ['SCORE', `${game.score}`],
       ];
       rows.forEach(([k, v], i) => {
-        const y = H / 2 - 40 + i * 28;
+        const y = H / 2 - (short ? 52 : 40) + i * (short ? 22 : 28);
         ctx.textAlign = 'right'; ctx.fillStyle = 'white'; ctx.fillText(k, W / 2 - 10, y);
         ctx.textAlign = 'left'; ctx.fillStyle = i === rows.length - 1 ? '#facc15' : 'white'; ctx.fillText(v, W / 2 + 10, y);
       });
       ctx.textAlign = 'center';
-      if (game.stateTimer > 45) pulseText(game.levelIndex >= 0 && game.levelIndex + 1 < LEVELS.length ? 'PRESS SPACE TO FLY ON' : 'PRESS SPACE', W / 2, H / 2 + 130);
+      if (game.stateTimer > 45) pulseText(game.levelIndex >= 0 && game.levelIndex + 1 < LEVELS.length ? (touchUI ? 'TAP TO FLY ON' : 'PRESS SPACE TO FLY ON') : (touchUI ? 'TAP TO CONTINUE' : 'PRESS SPACE'), W / 2, short ? H - 26 : H / 2 + 130);
       ctx.globalAlpha = 1;
     }
 
@@ -2198,7 +2293,7 @@
       ctx.fillText(`${game.levelIndex < 0 ? 'CUSTOM SYSTEM' : `REACHED LEVEL ${game.levelIndex + 1}`}   ·   SCORE ${game.score}`, W / 2, H / 2 + 10);
       if (game.levelIndex >= 0 && game.score > 0 && game.score >= highScore) { ctx.fillStyle = '#facc15'; ctx.fillText('NEW HIGH SCORE!', W / 2, H / 2 + 45); }
       else { ctx.fillStyle = '#4fc3f7'; ctx.fillText(`HIGH SCORE ${highScore}`, W / 2, H / 2 + 45); }
-      if (game.stateTimer > 90) pulseText('PRESS SPACE', W / 2, H / 2 + 120);
+      if (game.stateTimer > 90) pulseText(touchUI ? 'TAP TO CONTINUE' : 'PRESS SPACE', W / 2, H / 2 + 120);
       ctx.globalAlpha = 1;
     }
 
@@ -2213,7 +2308,7 @@
       ctx.fillText(`FINAL SCORE ${game.score}`, W / 2, H / 2 + 10);
       ctx.fillStyle = '#4fc3f7';
       ctx.fillText(game.score >= highScore ? 'NEW HIGH SCORE!' : `HIGH SCORE ${highScore}`, W / 2, H / 2 + 45);
-      if (game.stateTimer > 90) pulseText('PRESS SPACE', W / 2, H / 2 + 120);
+      if (game.stateTimer > 90) pulseText(touchUI ? 'TAP TO CONTINUE' : 'PRESS SPACE', W / 2, H / 2 + 120);
       ctx.globalAlpha = 1;
     }
 
@@ -2258,8 +2353,9 @@
         ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '14px monospace';
         ctx.fillText(`LAST RUN  ${game.score}`, cx, cy + 30);
       }
-      ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.font = '14px monospace';
-      ctx.fillText('ARROWS / WASD  steer & thrust     SPACE  booster     F  camera follow     M  music     X  abandon run', cx, H - 48);
+      ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.font = W < 760 ? '12px monospace' : '14px monospace';
+      ctx.fillText(touchUI ? 'JOYSTICK  push forward to thrust, sideways to turn     BOOSTER  hold the button'
+                           : 'ARROWS / WASD  steer & thrust     SPACE  booster     F  camera follow     M  music     X  abandon run', cx, H - 48);
       ctx.fillText(`${LEVELS.length} STAR SYSTEMS   ·   SOUND ${OrbitalAudio.isMuted() ? 'OFF' : 'ON'}`, cx, H - 26);
       startButton.style.display = 'block';
     }
@@ -2270,9 +2366,10 @@
       ctx.save();
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillStyle = '#4fc3f7'; ctx.font = 'bold 34px SpaceFont, Arial';
-      ctx.fillText('STAR MAP', W / 2, 44);
+      const short = H < 520;
+      ctx.fillText('STAR MAP', W / 2, short ? 30 : 44);
       ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '14px monospace';
-      ctx.fillText(`${Math.min(cleared, LEVELS.length)} OF ${LEVELS.length} SYSTEMS CLEARED`, W / 2, 72);
+      ctx.fillText(`${Math.min(cleared, LEVELS.length)} OF ${LEVELS.length} SYSTEMS CLEARED`, W / 2, short ? 54 : 72);
       if (game.inRun) {
         ctx.textAlign = 'right'; ctx.fillStyle = 'white'; ctx.font = 'bold 22px monospace';
         ctx.fillText(`${game.score}`, W - 16, 24);
@@ -2332,9 +2429,9 @@
       const sel = LEVELS[map.selected], sst = mapStarStyle(map.selected);
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillStyle = sst.color; ctx.font = 'bold 26px SpaceFont, Arial';
-      ctx.fillText(map.travel ? `EN ROUTE TO ${LEVELS[map.travel.to].name}` : sel.name, W / 2, H - 172);
+      ctx.fillText(map.travel ? `EN ROUTE TO ${LEVELS[map.travel.to].name}` : sel.name, W / 2, H - (short ? 150 : 172));
       ctx.fillStyle = 'white'; ctx.font = '15px monospace';
-      ctx.fillText(sel.brief, W / 2, H - 144);
+      ctx.fillText(sel.brief, W / 2, H - (short ? 126 : 144));
       const status = map.selected < cleared ? 'CLEARED' : map.selected === maxLevelReached ? 'NEXT' : 'UNLOCKED';
       const tags = [status, `${sel.planets.length} PLANET${sel.planets.length > 1 ? 'S' : ''}`, `TIME ${formatTime(sel.time)}`];
       if (levelBelts(sel).length) tags.push('ASTEROIDS');
@@ -2343,7 +2440,7 @@
       const nr = levelRivals(sel).length;
       if (nr) tags.push(nr > 1 ? `${nr} RIVALS` : 'RIVAL');
       ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.font = '13px monospace';
-      ctx.fillText(tags.join('   ·   '), W / 2, H - 120);
+      ctx.fillText(tags.join('   ·   '), W / 2, H - (short ? 104 : 120));
       // buttons
       const go = mapButtons[0], back = mapButtons[1], cust = mapButtons[2];
       go.x = W / 2 - go.w / 2; go.y = H - 84;
@@ -2351,7 +2448,7 @@
       cust.x = W - 16 - cust.w; cust.y = H - 56;
       drawButton(go); drawButton(back); drawButton(cust);
       ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('ARROWS  choose a system     ENTER  launch     C  build your own     click a star to select it, click again to go', W / 2, H - 18);
+      ctx.fillText(touchUI ? 'TAP a star to select it, tap again to go     CUSTOM  build your own' : 'ARROWS  choose a system     ENTER  launch     C  build your own     click a star to select it, click again to go', W / 2, H - 18);
       ctx.restore();
     }
 
@@ -2361,14 +2458,15 @@
       ctx.save();
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillStyle = '#facc15'; ctx.font = 'bold 34px SpaceFont, Arial';
-      ctx.fillText('CUSTOM SYSTEM', W / 2, 44);
+      const short = H < 520;
+      ctx.fillText('CUSTOM SYSTEM', W / 2, short ? 30 : 44);
       ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '14px monospace';
-      ctx.fillText('BUILD A STAR SYSTEM AND FLY IT', W / 2, 72);
+      ctx.fillText('BUILD A STAR SYSTEM AND FLY IT', W / 2, short ? 54 : 72);
       // the choices
-      const lx = Math.round(W * 0.08), vx = Math.round(W * 0.34), y0 = Math.round(H * 0.3), dy = 64;
+      const lx = Math.round(W * 0.08), vx = Math.round(W * 0.34), y0 = Math.round(H * (short ? 0.27 : 0.3)), dy = short ? 48 : 64, rh = short ? 42 : 48;
       CUSTOM_ROWS.forEach((row, i) => {
         const y = y0 + i * dy, sel = i === custom.row, dim = row.key === 'skill' && custom.rivals === 0, v = custom[row.key];
-        const R = custom.rows[i]; R.x = lx - 16; R.y = y - 24; R.w = vx + 150 - R.x; R.h = 48;
+        const R = custom.rows[i]; R.x = lx - 16; R.y = y - rh / 2; R.w = vx + 150 - R.x; R.h = rh;
         if (sel) { ctx.fillStyle = 'rgba(79,195,247,0.1)'; roundRectPath(R.x, R.y, R.w, R.h, 8); ctx.fill(); }
         ctx.globalAlpha = dim ? 0.35 : 1;
         ctx.textAlign = 'left'; ctx.fillStyle = sel ? '#4fc3f7' : 'rgba(255,255,255,0.8)'; ctx.font = `${sel ? 'bold ' : ''}16px SpaceFont, Arial`;
@@ -2390,22 +2488,21 @@
       // what the rival handicap means, under the choices
       const sk = CUSTOM_SKILLS[custom.skill], ly = y0 + CUSTOM_ROWS.length * dy - 10;
       ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.font = '12px monospace';
-      if (custom.rivals > 0) {
-        ctx.fillText(`${sk.label}: ${Math.round(sk.thrust * 100)}% thrust, ${Math.round(sk.turn * 100)}% turn rate,`, lx, ly);
-        ctx.fillText(`pauses ${(sk.pause / 60).toFixed(0)} s after each capture and ${(sk.linger / 60).toFixed(0)} s after each pickup`, lx, ly + 18);
-      } else {
-        ctx.fillText('No rivals: collect the ore quota before time runs out', lx, ly);
-      }
+      const pct = v => `${Math.round(v * 100)}%`, secs = t => `${(t / 60).toFixed(0)} s`;
+      const lines = custom.rivals === 0 ? ['No rivals: collect the ore quota before time runs out']
+                  : short ? [`${sk.label}: ${pct(sk.thrust)} thrust, ${pct(sk.turn)} turn rate`, `pauses ${secs(sk.pause)}/capture, ${secs(sk.linger)}/pickup`]
+                  : [`${sk.label}: ${pct(sk.thrust)} thrust, ${pct(sk.turn)} turn rate,`, `pauses ${secs(sk.pause)} after each capture and ${secs(sk.linger)} after each pickup`];
+      lines.forEach((t, i) => ctx.fillText(t, lx, ly + i * 18));
       // the generated system
-      const cx = Math.round(W * 0.73), cy = Math.round(H * 0.47), R = Math.round(Math.min(W * 0.17, H * 0.25));
+      const cx = Math.round(W * 0.73), cy = Math.round(H * (short ? 0.42 : 0.47)), R = Math.round(Math.min(W * 0.17, H * (short ? 0.22 : 0.25)));
       drawCustomPreview(cx, cy, R);
       const nr = levelRivals(L).length;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillStyle = Object.assign({}, DEFAULT_STAR, L.star).color; ctx.font = 'bold 22px SpaceFont, Arial';
-      ctx.fillText(L.name, cx, cy + R + 36);
+      ctx.fillText(L.name, cx, cy + R + (short ? 28 : 36));
       ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '13px monospace';
-      ctx.fillText(`${L.planets.length} WORLDS   ·   ${L.oreTotal} ORE   ·   TIME ${formatTime(L.time)}`, cx, cy + R + 60);
-      ctx.fillText(nr ? `WIN: MORE ORE THAN ${nr > 1 ? 'EVERY RIVAL' : 'THE RIVAL'}` : `WIN: COLLECT ${L.goal.count} ORE`, cx, cy + R + 80);
+      ctx.fillText(`${L.planets.length} WORLDS   ·   ${L.oreTotal} ORE   ·   TIME ${formatTime(L.time)}`, cx, cy + R + (short ? 46 : 60));
+      ctx.fillText(nr ? `WIN: MORE ORE THAN ${nr > 1 ? 'EVERY RIVAL' : 'THE RIVAL'}` : `WIN: COLLECT ${L.goal.count} ORE`, cx, cy + R + (short ? 62 : 80));
       // buttons
       const go = customButtons[0], back = customButtons[1], shuf = customButtons[2];
       go.x = W / 2 - go.w / 2; go.y = H - 84;
@@ -2413,7 +2510,7 @@
       shuf.x = W - 16 - shuf.w; shuf.y = H - 56;
       drawButton(go); drawButton(back); drawButton(shuf);
       ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('UP / DOWN  choose a setting     LEFT / RIGHT  change it     R  new layout     ENTER  launch', W / 2, H - 18);
+      ctx.fillText(touchUI ? 'TAP the arrows to change a setting     SHUFFLE  new layout     LAUNCH  fly it' : 'UP / DOWN  choose a setting     LEFT / RIGHT  change it     R  new layout     ENTER  launch', W / 2, H - 18);
       ctx.restore();
     }
     function drawCustomPreview(cx, cy, R) {   // the system to scale: orbits, worlds, and who starts where
@@ -2466,6 +2563,7 @@
         if (!rocket.dead) { checkCollisions(); collectItems(); }
         for (const r of rivals) { if (game.state !== GAME_STATE.PLAYING || r.dead) continue; rival = r; rivalCollisions(); rivalCollect(); }
         if (game.state === GAME_STATE.PLAYING) { updateTimer(); updateCombo(); handleRespawn(); for (const r of rivals) { rival = r; rivalRespawn(); } }
+        if (game.abandonArmed > 0) game.abandonArmed--;
         computePrediction(); updateCamera(); syncEngineAudio();
         return;
       }
