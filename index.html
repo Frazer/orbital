@@ -1879,7 +1879,7 @@
         let b = null;
         const P = playerAtX(x);
         usePlayer(P);
-        withView(P, () => { layoutButtons(); b = buttonAt(x - VX, y) || hudLinkAt(x - VX, y); });
+        withView(P, () => { layoutButtons(); b = buttonAt(x - VX, y) || hudLinkAt(x - VX, y) || zoomButtonAt(x - VX, y); });
         return b;
       }
       function releasePress() { if (pressedButton) { usePlayer(pressedPlayer); pressedButton.release(); pressedButton = null; } }
@@ -1911,6 +1911,8 @@
       canvas.addEventListener('mouseup', () => { isDragging = false; releasePress(); });
       canvas.addEventListener('mouseleave', () => { isDragging = false; releasePress(); hoverButton = null; });
       // Touch: each finger is tracked by its identifier, so the stick and a button can be held at once.
+      const pinch = { pts: new Map(), d0: 1, z0: 1 };   // two free fingers (not on the stick or a button) pinch to zoom
+      const pinchDist = () => { const [a, b] = [...pinch.pts.values()]; return Math.hypot(a.x - b.x, a.y - b.y) || 1; };
       canvas.addEventListener('touchstart', e => {
         unlockAudio(); touchUI = true;
         for (const t of e.changedTouches) {
@@ -1918,25 +1920,31 @@
           if (game.state === GAME_STATE.PLAYING) {
             if (joy.id === null && joyHit(x, y)) { joy.id = t.identifier; joyMove(x, y); continue; }
             const b = viewButtonAt(x, y);
-            if (b) { b.press(); touchButtons.set(t.identifier, { b, P: me }); }
+            if (b) { b.press(); touchButtons.set(t.identifier, { b, P: me }); continue; }
+            if (pinch.pts.size < 2) { pinch.pts.set(t.identifier, { x, y }); if (pinch.pts.size === 2) { pinch.d0 = pinchDist(); pinch.z0 = localPlayer().camera.zoomMul; } }
           } else pressAt(x, y);
         }
         e.preventDefault();   // no scrolling, zooming or simulated mouse clicks from the canvas
       }, { passive: false });
       canvas.addEventListener('touchmove', e => {
-        for (const t of e.changedTouches) if (t.identifier === joy.id) joyMove(t.clientX, t.clientY);
+        for (const t of e.changedTouches) {
+          if (t.identifier === joy.id) joyMove(t.clientX, t.clientY);
+          const p = pinch.pts.get(t.identifier);
+          if (p) { p.x = t.clientX; p.y = t.clientY; if (pinch.pts.size === 2) localPlayer().camera.zoomMul = clamp(pinch.z0 * pinchDist() / pinch.d0, 0.25, 3); }
+        }
         e.preventDefault();
       }, { passive: false });
       const touchEnd = e => {
         for (const t of e.changedTouches) {
           if (t.identifier === joy.id) joyRelease();
+          pinch.pts.delete(t.identifier);
           const h = touchButtons.get(t.identifier);
           if (h) { usePlayer(h.P); h.b.release(); touchButtons.delete(t.identifier); }
         }
       };
       canvas.addEventListener('touchend', touchEnd);
       canvas.addEventListener('touchcancel', touchEnd);
-      window.addEventListener('blur', () => { joyRelease(); for (const h of touchButtons.values()) { usePlayer(h.P); h.b.release(); } touchButtons.clear(); });
+      window.addEventListener('blur', () => { joyRelease(); pinch.pts.clear(); for (const h of touchButtons.values()) { usePlayer(h.P); h.b.release(); } touchButtons.clear(); });
 
       document.addEventListener('keydown', e => {
         unlockAudio();
@@ -1969,6 +1977,8 @@
           if (k === 'Escape' || k === 'x' || k === 'X') netLeave();
           else if (S === GAME_STATE.PLAYING) {
             if (k === 'f' || k === 'F') camera.follow = !camera.follow;
+            if (k === '+' || k === '=') zoomStep(1, localPlayer().camera);
+            if (k === '-' || k === '_') zoomStep(-1, localPlayer().camera);
             if (localPlayer().keys.nav.includes(k.toLowerCase())) { net.navToggles++; usePlayer(localPlayer()); toggleNav(); }
           }
         } else if (S === GAME_STATE.MAP) {
@@ -1994,6 +2004,8 @@
           else if (k === 'Escape') { if (game.levelIndex < 0) openCustom(); else openMap(game.levelIndex); }
         } else if (S === GAME_STATE.PLAYING) {
           if (k === 'x' || k === 'X') endGame('Run abandoned');
+          if (k === '+' || k === '=') for (const P of players) zoomStep(1, P.camera);
+          if (k === '-' || k === '_') for (const P of players) zoomStep(-1, P.camera);
           if (k === 'f' || k === 'F') for (const P of players) P.camera.follow = !P.camera.follow;
           for (const P of players) if (P.keys.nav.includes(k) || P.keys.nav.includes(k.toLowerCase())) { usePlayer(P); toggleNav(); }
         } else if (S === GAME_STATE.LEVEL_COMPLETE) {
@@ -2318,6 +2330,30 @@
     ];
     for (const l of hudLinks) Object.assign(l, { x: 0, y: 0, w: 0, h: 22 });
     function hudLinkAt(x, y) { return touchUI ? hudLinks.find(l => hit(l, x, y)) || null : null; }
+    // Zoom: the mouse wheel or touchpad scroll, the + and − keys, a pinch on a touch screen, or these two buttons by the minimap
+    function zoomStep(dir, cam) { const c = cam || camera; c.zoomMul = clamp(c.zoomMul * Math.exp(dir * 0.3), 0.25, 3); }
+    const zoomButtons = [
+      { id: 'zoomIn', glyph: '+', x: 0, y: 0, w: 28, h: 28, press() { zoomStep(1); }, release() {} },
+      { id: 'zoomOut', glyph: '−', x: 0, y: 0, w: 28, h: 28, press() { zoomStep(-1); }, release() {} },
+    ];
+    function minimapGeom() {   // where the minimap sits in the current view
+      const split = viewPlayers().length > 1, size = touchUI || split ? 110 : 150, pad = 16;
+      return { size, cx: W - pad - size / 2, cy: touchUI ? 112 + size / 2 : split ? H - 100 - size / 2 : H - pad - size / 2 };
+    }
+    function layoutZoomButtons() { const m = minimapGeom(); zoomButtons.forEach((b, i) => { b.x = m.cx - m.size / 2 - 42; b.y = m.cy - 31 + i * 34; }); }
+    function zoomButtonAt(x, y) { layoutZoomButtons(); return zoomButtons.find(b => hit(b, x, y)) || null; }
+    function drawZoomButtons() {
+      layoutZoomButtons();
+      ctx.save();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold 18px monospace'; ctx.lineWidth = 1;
+      for (const b of zoomButtons) {
+        ctx.beginPath(); ctx.arc(b.x + 14, b.y + 14, 14, 0, Math.PI * 2);
+        ctx.fillStyle = hoverButton === b && hoverVX === VX ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.5)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(79,195,247,0.5)'; ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fillText(b.glyph, b.x + 14, b.y + 15);
+      }
+      ctx.restore();
+    }
     function drawHudLinks(x, y) {
       ctx.font = 'bold 11px monospace'; ctx.textBaseline = 'middle'; ctx.textAlign = 'center'; ctx.lineWidth = 1;
       for (const l of hudLinks) {
@@ -3082,7 +3118,7 @@
       else if (!split) {
         ctx.textAlign = 'left'; ctx.textBaseline = 'top';
         ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace';
-        ctx.fillText(`M  music ${OrbitalAudio.isMuted() ? 'off' : 'on'}  ·  F  follow ${camera.follow ? 'on' : 'off'}  ·  X  abandon`, 16, 78 + oy);
+        ctx.fillText(`M  music ${OrbitalAudio.isMuted() ? 'off' : 'on'}  ·  F  follow ${camera.follow ? 'on' : 'off'}  ·  X  abandon  ·  SCROLL or + −  zoom`, 16, 78 + oy);
       }
       drawConsole();
       if (touchUI && game.state === GAME_STATE.PLAYING && me === localPlayer()) drawJoystick();
@@ -3097,8 +3133,8 @@
     }
 
     function drawMinimap() {
-      const split = viewPlayers().length > 1, size = touchUI || split ? 110 : 150, pad = 16, cx = W - pad - size / 2;
-      const cy = touchUI ? 112 + size / 2 : split ? H - 100 - size / 2 : H - pad - size / 2;   // under the lives on touch screens, out of the thumb's way; above the console in a half-width view
+      const { size, cx, cy } = minimapGeom();   // under the lives on touch screens, out of the thumb's way; above the console in a half-width view
+      drawZoomButtons();
       let range = 0;
       for (const p of planets) range = Math.max(range, p.distance);
       for (const A of levelBelts(game.level)) range = Math.max(range, A.outer);
@@ -3158,6 +3194,7 @@
       const notes = (L.notes || []).slice();
       if (players.length > 1 && !online()) notes.push(...players.map(p => `${p.name}:  ${KEY_HELP[p.name]}`));   // who presses what
       if (online()) notes.push(`ONLINE  ·  YOU ARE ${localPlayer().name}  ·  ${isHost() ? 'THE OTHER PILOT IS' : 'THE HOST IS'} ${otherPlayers()[0].name}`);
+      if (game.levelIndex === 0) notes.push(touchUI ? 'ZOOM  ·  pinch with two fingers, or the + and − buttons by the map' : 'ZOOM  ·  mouse wheel or touchpad scroll, the + and − keys, or the buttons by the map');
       if (notes.length) {   // new mechanics introduced on this level
         ctx.fillStyle = '#facc15'; ctx.font = `${px(14)} monospace`;
         notes.forEach((line, i) => { ctx.fillStyle = line.startsWith('P1') ? '#4fc3f7' : line.startsWith('P2') ? '#fb923c' : '#facc15'; ctx.fillText(line, W / 2, H / 2 + 112 * k + i * 20 * f); });
@@ -3285,8 +3322,8 @@
         ctx.fillStyle = '#fb923c'; ctx.fillText(`P2  ${KEY_HELP.P2}`, cx, H - 48);
         ctx.fillStyle = 'rgba(255,255,255,0.75)';
       } else {
-        ctx.fillText(touchUI ? 'JOYSTICK  push forward to thrust, sideways to turn     BOOSTER  hold the button'
-                             : 'ARROWS / WASD  steer & thrust     SPACE  booster     F  camera follow     M  music     X  abandon run', cx, H - 48);
+        ctx.fillText(touchUI ? 'JOYSTICK  push forward to thrust, sideways to turn     BOOSTER  hold the button     PINCH or + −  zoom'
+                             : 'ARROWS / WASD  steer & thrust     SPACE  booster     SCROLL or + −  zoom     F  camera follow     M  music     X  abandon run', cx, H - 48);
       }
       ctx.fillText(`${LEVELS.length} STAR SYSTEMS   ·   SOUND ${OrbitalAudio.isMuted() ? 'OFF' : 'ON'}`, cx, H - 26);
       startButton.style.display = 'block';
