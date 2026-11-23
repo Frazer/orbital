@@ -2349,7 +2349,7 @@
         let room = null;
         try { room = CG.sdk.game.getInviteParam('room'); } catch (e) {}
         if (room) { if (netIsSlot(String(room))) netJoin(String(room)); else { lobby.joinCode = String(room).toUpperCase().slice(0, 4); openLobby('join'); } }
-        else if (CG.sdk.game.isInstantMultiplayer) openLobby(null);
+        else if (CG.sdk.game.isInstantMultiplayer) { openLobby(null); netHost(false); }   // a party leader: open a private room at once so the party can join
       }).catch(() => {});
     }
     // ---------- Online play ----------
