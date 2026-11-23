@@ -2363,7 +2363,7 @@
     const NET_ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }] };
     const net = {
       role: null,            // null, 'host' or 'guest'
-      status: '', error: '', code: '', room: '', peer: null, conn: null, libReady: false, libLoading: false, libWaiters: [],
+      status: '', error: '', code: '', room: '', link: '', peer: null, conn: null, libReady: false, libLoading: false, libWaiters: [],
       pub: false, pubFull: false, callSign: '', watchers: [],   // a public host: its room is listed, and welcome screens watching it are told when it fills
       browser: null, slots: {}, busy: {}, browseAt: -1e9, joinName: '',   // looking for public games: one probe connection per room
       rtt: 0, pingSent: 0, lastSnapT: -1, ack: 0, hostMax: 0, hostCleared: 0,
@@ -2433,7 +2433,7 @@
           net.room = net.pub ? netSlotId(slot) : netCode(); net.code = net.pub ? '' : net.room;
           net.status = 'Opening the room…';
           const peer = net.peer = new Peer('orbital-' + net.room, { config: NET_ICE, debug: 0 });
-          peer.on('open', () => { if (net.peer !== peer) return; net.status = net.pub ? 'Listed for everyone. Waiting for a pilot…' : 'Waiting for a pilot to join…'; cg(g => g.updateRoom({ roomId: net.room, isJoinable: true, inviteParams: { room: net.room } })); });
+          peer.on('open', () => { if (net.peer !== peer) return; net.status = net.pub ? 'Listed for everyone. Waiting for a pilot…' : 'Waiting for a pilot to join…'; cg(g => g.updateRoom({ roomId: net.room, isJoinable: true, inviteParams: { room: net.room } })); net.link = netLink(); });
           peer.on('connection', conn => {
             if (net.peer !== peer) return;
             if (conn.metadata && conn.metadata.browse) {   // a welcome screen asking who is here
@@ -2500,7 +2500,7 @@
       cg(g => g.leftRoom());
       netTellWatchers();
       if (peer) { try { peer.destroy(); } catch (e) {} }
-      net.role = null; net.status = ''; net.code = ''; net.room = ''; net.pub = false;
+      net.role = null; net.status = ''; net.code = ''; net.room = ''; net.link = ''; net.pub = false;
       setPlayers(1);
     }
     function netConnected() {
@@ -2748,7 +2748,7 @@
     let copyNote = 0;
     function netCopyLink() {
       if (!net.room) return;
-      const text = netLink();
+      const text = net.link || netLink();
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => { copyNote = 120; }, () => {});
       OrbitalAudio.sfx.select();
     }
@@ -2836,15 +2836,15 @@
           ctx.fillStyle = net.room ? '#facc15' : 'rgba(255,255,255,0.3)'; ctx.font = 'bold 48px monospace';
           ctx.fillText(net.room ? net.callSign : '· · ·', W / 2, cy - 10);
           ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '14px monospace';
-          if (net.room) { ctx.fillText('It shows on the welcome screen of everyone who opens Orbital. Or send this link:', W / 2, cy + 44); ctx.fillStyle = '#4fc3f7'; ctx.fillText(netLink(), W / 2, cy + 66); }
+          if (net.room) { ctx.fillText(`It shows on the welcome screen of everyone who opens Orbital. Or send ${net.link.length > 90 ? 'an invite link:' : 'this link:'}`, W / 2, cy + 44); ctx.fillStyle = '#4fc3f7'; if (net.link.length <= 90) ctx.fillText(net.link, W / 2, cy + 66); }
         } else {
           ctx.fillText(net.pubFull ? 'EVERY PUBLIC ROOM IS BUSY, SO THIS GAME IS PRIVATE' : 'YOUR ROOM CODE', W / 2, cy - 70);
           ctx.fillStyle = net.code ? '#facc15' : 'rgba(255,255,255,0.3)'; ctx.font = 'bold 72px monospace';
           ctx.fillText(net.code ? net.code.split('').join(' ') : '· · · ·', W / 2, cy - 10);
           ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '14px monospace';
-          if (net.code) { ctx.fillText('Tell the other pilot the code, or send them this link:', W / 2, cy + 44); ctx.fillStyle = '#4fc3f7'; ctx.fillText(netLink(), W / 2, cy + 66); }
+          if (net.code) { ctx.fillText(`Tell the other pilot the code, or send them ${net.link.length > 90 ? 'an invite link:' : 'this link:'}`, W / 2, cy + 44); ctx.fillStyle = '#4fc3f7'; if (net.link.length <= 90) ctx.fillText(net.link, W / 2, cy + 66); }
         }
-        const c = lobbyButtons[4]; c.x = W / 2 - c.w / 2; c.y = cy + 90; c.label = copyNote > 0 ? 'LINK COPIED' : 'COPY LINK';
+        const c = lobbyButtons[4]; c.x = W / 2 - c.w / 2; c.y = cy + (net.link.length > 90 ? 66 : 90); c.label = copyNote > 0 ? 'LINK COPIED' : 'COPY LINK';
         drawButton(c);
         if (copyNote > 0) copyNote--;
       } else if (lobby.mode === 'join') {
