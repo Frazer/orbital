@@ -308,7 +308,7 @@
         ] },
       { name: 'OMEGA', theme: 'storm', battery: true,
         star: { name: 'Omega', radius: 36, color: '#fde047', mass: 1200000, luminosity: 0.9, heatRadius: 150 },
-        brief: 'The last system. Strip it of 50 ore to conquer the galaxy.',
+        brief: 'The last of the home sector. Strip it of 50 ore to open the way to the frontier.',
         hint: 'Everything at once: belts, a retrograde world, and a long haul. Good luck, pilot.',
         goal: { type: 'ore', count: 50 }, time: 900,
         planets: [
@@ -333,31 +333,77 @@
     const particles = [];
     const rings = [];
     const popups = [];
-    const trail = [];
-    let trailFrame = null;        // body the trail points are stored relative to (null: the sun, which never moves)
     let stars = [];
     const sunOnly = [sun];
     let gravBodies = [sun];
 
-    const rocket = {
-      x: 0, y: 0, vx: 0, vy: 0,
-      rotation: Math.PI,          // direction of thrust; PI points "down" (+y) on screen
-      rotationSpeed: 0.05,
-      mass: 20,
-      thrustPower: 0.06,
-      boostPower: 0.5,
-      fuel: 0, battery: 0, charging: false,
-      dead: false, respawnTimer: 0, heat: 0, invuln: 0,
-      thrusting: false, boosting: false,
-    };
+    // ---------- Players ----------
+    // One pilot, or two at one keyboard. Each has a ship (the rocket), lives, battery, nav AI, trail, flight-path
+    // prediction, camera and controls of its own. The rocket code works on `me` and `rocket`, the player whose turn
+    // it is; usePlayer() switches them, the way `rival` switches between the rival ships.
+    const P1_PALETTE = { body: '#e5e7eb', nose: '#4fc3f7', fin: '#ef4444' }, P2_PALETTE = { body: '#e5e7eb', nose: '#fb923c', fin: '#ef4444' };
+    const KEYS_SOLO = { up: ['ArrowUp', 'w'], left: ['ArrowLeft', 'a'], right: ['ArrowRight', 'd'], boost: [' ', 'ShiftLeft', 'ShiftRight'], nav: ['n'], charge: ['r'] };
+    const KEYS_P1 = { up: ['w'], left: ['a'], right: ['d'], boost: ['ShiftLeft', 'q'], nav: ['e'], charge: ['r'] };
+    const KEYS_P2 = { up: ['ArrowUp'], left: ['ArrowLeft'], right: ['ArrowRight'], boost: ['ShiftRight', ' '], nav: ['/'], charge: ['.'] };
+    const KEY_HELP = { P1: 'W A D  +  LEFT SHIFT boost  ·  E nav AI  ·  R recharge', P2: 'ARROWS  +  RIGHT SHIFT or SPACE boost  ·  / nav AI  ·  . recharge' };
+    function makePlayer(index) {
+      return {
+        index, name: 'YOU', color: '#4fc3f7', pal: P1_PALETTE, keys: KEYS_SOLO,
+        ship: {
+          x: 0, y: 0, vx: 0, vy: 0,
+          rotation: Math.PI,          // direction of thrust; PI points "down" (+y) on screen
+          rotationSpeed: 0.05,
+          mass: 20,
+          thrustPower: 0.06,
+          boostPower: 0.5,
+          fuel: 0, battery: 0, charging: false,
+          dead: false, respawnTimer: 0, heat: 0, invuln: 0,
+          thrusting: false, boosting: false,
+        },
+        lives: START_LIVES, ore: 0, combo: 0, comboTimer: 0, nav: true, deathReason: '', out: false,   // out: no ships left this level
+        trail: [], trailFrame: null, closest: null, closestSQ: Infinity,
+        prediction: { pts: [], hit: null, frame: null },   // pts are relative to frame (a body) when set
+        camera: { scale: 1, zoomMul: 1, focusX: 0, focusY: 0, offsetX: 0, offsetY: 0, follow: true, shake: 0 },   // focus is the world point at screen centre; offsets are derived
+        ui: { boost: false, charge: false },   // on-screen buttons being held
+      };
+    }
+    const players = [makePlayer(0)];
+    let me = null, rocket = null, trail = null, trailFrame = null, prediction = null, camera = null, ui = null;
+    let closestPlanet = null, closestDistanceSQ = Infinity;
+    function usePlayer(P) {   // make P the player the rocket code works on
+      if (me) { me.trailFrame = trailFrame; me.closest = closestPlanet; me.closestSQ = closestDistanceSQ; }
+      me = P; rocket = P.ship; trail = P.trail; trailFrame = P.trailFrame; prediction = P.prediction; camera = P.camera; ui = P.ui;
+      closestPlanet = P.closest; closestDistanceSQ = P.closestSQ;
+    }
+    function setPlayers(n) {   // one pilot, or two sharing the keyboard (fresh ships: only between runs)
+      players.length = 0;
+      for (let i = 0; i < n; i++) players.push(makePlayer(i));
+      if (n > 1) {
+        Object.assign(players[0], { name: 'P1', keys: KEYS_P1 });
+        Object.assign(players[1], { name: 'P2', color: '#fb923c', pal: P2_PALETTE, keys: KEYS_P2 });
+      }
+      me = null; usePlayer(players[0]);
+    }
+    function otherPlayers() { return players.filter(p => p !== me); }
+    function playerAtX(x) { return players.length > 1 && x >= W / 2 ? players[1] : players[0]; }   // whose half of the screen a point is in
+    let VX = 0;   // the x origin of the view being drawn (the right half starts at W / 2 in two-player mode)
+    function withView(P, fn) {   // run fn with W and VX set to P's share of the screen
+      const full = W;
+      if (players.length > 1) { W = Math.floor(full / 2); VX = P.index * W; }
+      try { fn(); } finally { W = full; VX = 0; }
+    }
+    usePlayer(players[0]);
     // Rival prospectors on race levels: ships with the same physics as the rocket, each flown by the game's pilot.
     // The pilot's functions all work on `rival`, the ship whose turn it is; tick() points it at each ship in turn.
     const rivals = [];
     let rival = null;
-    const RIVAL_LOOKS = [   // colour and paint for the first, second and third rival
+    const RIVAL_LOOKS = [   // colour and paint for up to six rivals (orange is kept for the second player)
       { color: '#f472b6', pal: { body: '#fbcfe8', nose: '#f472b6', fin: '#9d174d' } },
-      { color: '#fb923c', pal: { body: '#fed7aa', nose: '#fb923c', fin: '#9a3412' } },
       { color: '#a78bfa', pal: { body: '#ddd6fe', nose: '#a78bfa', fin: '#5b21b6' } },
+      { color: '#2dd4bf', pal: { body: '#99f6e4', nose: '#2dd4bf', fin: '#115e59' } },
+      { color: '#a3e635', pal: { body: '#d9f99d', nose: '#a3e635', fin: '#3f6212' } },
+      { color: '#fb7185', pal: { body: '#fecdd3', nose: '#fb7185', fin: '#9f1239' } },
+      { color: '#fbbf24', pal: { body: '#fde68a', nose: '#fbbf24', fin: '#92400e' } },
     ];
     function rivalName(i, count) { return count > 1 ? `RIVAL ${i + 1}` : 'RIVAL'; }
     function makeRival(index) {
@@ -365,7 +411,7 @@
       return {
         index, name: 'RIVAL', color: look.color, pal: look.pal, cfg: null,
         x: 0, y: 0, vx: 0, vy: 0, rotation: 0, rotationSpeed: 0.05, mass: 20, thrustPower: 0.06, boostPower: 0.5,
-        fuel: 0, ore: 0, dead: false, respawnTimer: 0, heat: 0, thrusting: false, boosting: false, crashes: 0, lastOreTick: -999,
+        fuel: 0, ore: 0, dead: false, respawnTimer: 0, heat: 0, thrusting: false, boosting: false, crashes: 0, lastOreTick: -999, launched: true,
         ctl: { left: false, right: false, up: false, boost: false },   // what its pilot is pressing
         trail: [], trailFrame: null, nearest: null, nearestSQ: Infinity,
         ai: null,
@@ -374,10 +420,9 @@
 
     const game = {
       state: GAME_STATE.WELCOME, levelIndex: 0, level: null,
-      score: 0, lives: START_LIVES, ore: 0, timeLeft: 0, lastSec: -1, hot: false,
-      ticks: 0, stateTimer: 0, combo: 0, comboTimer: 0,
-      gameOverReason: '', deathReason: '', stats: null,
-      nav: true,                  // nav AI switched on (only matters on battery levels)
+      score: 0, ore: 0, timeLeft: 0, lastSec: -1, hot: false,   // ore: all the players' ore this level
+      ticks: 0, stateTimer: 0,
+      gameOverReason: '', stats: null,
       inRun: false,               // a run is in progress (score and lives carry across the star map)
       raceTotal: 0,               // ore in play on a race level
       abandonArmed: 0,            // ticks left in which a second tap on ABANDON ends the run (touch)
@@ -385,19 +430,16 @@
     let highScore = parseInt(localStorage.getItem('orbitalHighScore')) || 0;
     let maxLevelReached = parseInt(localStorage.getItem('orbitalMaxLevel')) || 0;   // index of the furthest level unlocked
     let cleared = parseInt(localStorage.getItem('orbitalCleared')) || 0;            // number of levels completed
-    const map = { selected: 0, rocketAt: 0, travel: null, hover: -1 };             // star map: chosen system, where the rocket sits, flight in progress
+    const map = { selected: 0, rocketAt: 0, travel: null, hover: -1, page: null }; // star map: chosen system, where the rocket sits, flight in progress, sector on show (null: the chosen system's)
 
-    const camera = { scale: 1, zoomMul: 1, focusX: 0, focusY: 0, offsetX: 0, offsetY: 0, follow: true, shake: 0 };   // focus is the world point at screen centre; offsets are derived
-    let closestPlanet = null, closestDistanceSQ = Infinity;
-    const prediction = { pts: [], hit: null, frame: null };   // pts are relative to frame (a body) when set
     const predBodies = [];
     let predGrav = [sun];
     const predRocket = { x: 0, y: 0, vx: 0, vy: 0, mass: 20 };
     const tmpForce = { fx: 0, fy: 0 };
-    let isDragging = false, lastX = 0, lastY = 0;
+    let isDragging = false, lastX = 0, lastY = 0, dragPlayer = null;
     const keys = {};
-    const ui = { boost: false, charge: false };   // on-screen buttons being held
-    let pressedButton = null, hoverButton = null;
+    const down = list => list.some(k => keys[k]);   // any of a player's keys for a control held
+    let pressedButton = null, pressedPlayer = null, hoverButton = null, hoverVX = 0;
     let audioThrust = false, audioBoost = false;
     const welcome = { rocketAngle: 0 };
 
@@ -414,7 +456,8 @@
     function worldToScreen(x, y) { return { x: x * camera.scale + W / 2 + camera.offsetX, y: y * camera.scale + H / 2 + camera.offsetY }; }
     function calculateMass(radius) { return Math.pow(radius, 3) * planetGravityFactor; }
     function orbitalVelocity(centralMass, r) { return Math.sqrt(G * centralMass / r); }
-    function soiRadius(mass) { return Math.sqrt(G * rocket.mass * mass / MIN_FORCE); }   // where the rocket stops feeling a body
+    const SHIP_MASS = 20;
+    function soiRadius(mass) { return Math.sqrt(G * SHIP_MASS * mass / MIN_FORCE); }   // where a ship stops feeling a body
     function homePlanet() { return planets.find(p => p.home) || planets[0]; }
     function levelBelts(L) { const A = L && L.asteroids; return !A ? [] : Array.isArray(A) ? A : [A]; }   // a level may have one belt or several
 
@@ -431,7 +474,9 @@
 
     function buildLevel(def) {
       planets.length = 0; ores.length = 0; fuels.length = 0; asteroids.length = 0;
-      particles.length = 0; rings.length = 0; popups.length = 0; trail.length = 0; rivals.length = 0; rival = null;
+      particles.length = 0; rings.length = 0; popups.length = 0; rivals.length = 0; rival = null;
+      for (const P of players) { P.trail.length = 0; P.trailFrame = null; }
+      trailFrame = null;
       Object.assign(sun, DEFAULT_STAR, def.star || {});
       def.planets.forEach((d, i) => {
         const mass = calculateMass(d.radius);
@@ -476,16 +521,16 @@
       moveCollectibles(0);
     }
 
-    // Put the rocket into a circular orbit around the home planet, facing prograde.
+    // Put the rocket into a circular orbit around the home planet, facing prograde; the second player starts on the far side.
     function spawnRocket() {
       const home = homePlanet();
       const orbitDist = home.radius + 12;
-      const v = orbitalVelocity(home.mass, orbitDist);
-      rocket.x = home.x + orbitDist;
+      const v = orbitalVelocity(home.mass, orbitDist), s = me.index % 2 === 0 ? 1 : -1;
+      rocket.x = home.x + orbitDist * s;
       rocket.y = home.y;
       rocket.vx = home.vx;
-      rocket.vy = home.vy + v;
-      rocket.rotation = Math.PI;
+      rocket.vy = home.vy + v * s;
+      rocket.rotation = s > 0 ? Math.PI : 0;
       rocket.dead = false; rocket.heat = 0; rocket.invuln = 120; rocket.thrusting = false; rocket.boosting = false;
       trail.length = 0; trailFrame = null;
       rocket.battery = BATTERY_MAX; rocket.charging = false;
@@ -522,9 +567,19 @@
         a.x = Math.cos(a.angle) * a.dist; a.y = Math.sin(a.angle) * a.dist;
         a.rot += a.rotSpeed;
       }
-      if (!rocket.dead) {
-        gravityAt(rocket.x, rocket.y, rocket.mass, gravBodies, tmpForce);
-        integrate(rocket, tmpForce, dt);
+      for (const P of players) {
+        usePlayer(P);
+        if (!rocket.dead) {
+          gravityAt(rocket.x, rocket.y, rocket.mass, gravBodies, tmpForce);
+          integrate(rocket, tmpForce, dt);
+        }
+        closestPlanet = null; closestDistanceSQ = Infinity;
+        for (const b of gravBodies) {
+          const dx = b.x - rocket.x, dy = b.y - rocket.y, d2 = dx * dx + dy * dy;
+          if (d2 < closestDistanceSQ) { closestDistanceSQ = d2; closestPlanet = b; }
+        }
+        if (!rocket.dead && game.ticks % 2 === 0) recordTrail();
+        if (rocket.invuln > 0) rocket.invuln--;
       }
       for (const r of rivals) {
         if (r.dead) continue;
@@ -532,15 +587,8 @@
         integrate(r, tmpForce, dt);
         nearestBody(r);
       }
-      closestPlanet = null; closestDistanceSQ = Infinity;
-      for (const b of gravBodies) {
-        const dx = b.x - rocket.x, dy = b.y - rocket.y, d2 = dx * dx + dy * dy;
-        if (d2 < closestDistanceSQ) { closestDistanceSQ = d2; closestPlanet = b; }
-      }
-      if (!rocket.dead && game.ticks % 2 === 0) recordTrail();
       if (game.ticks % 2 === 0) for (const r of rivals) if (!r.dead) r.trailFrame = recordTrailInto(r, r.trail, r.trailFrame, dominantBodyOf(r));
       moveCollectibles(dt);
-      if (rocket.invuln > 0) rocket.invuln--;
     }
 
     // The body whose sphere of influence the rocket is inside, if any. Paths are stored relative to
@@ -591,15 +639,15 @@
         if (dx * dx + dy * dy < COLLECT_RADIUS_SQ) {
           ores.splice(i, 1);
           o.planet.collected++;
-          game.ore++;
-          game.combo = game.comboTimer > 0 ? Math.min(MAX_COMBO, game.combo + 1) : 1;
-          game.comboTimer = COMBO_WINDOW;
-          const points = ORE_POINTS * game.combo;
+          game.ore++; me.ore++;
+          me.combo = me.comboTimer > 0 ? Math.min(MAX_COMBO, me.combo + 1) : 1;
+          me.comboTimer = COMBO_WINDOW;
+          const points = ORE_POINTS * me.combo;
           game.score += points;
-          popup(o.x, o.y, `+${points}` + (game.combo > 1 ? `  x${game.combo}` : ''), '#facc15');
+          popup(o.x, o.y, `+${points}` + (me.combo > 1 ? `  x${me.combo}` : ''), '#facc15');
           sparkle(o.x, o.y, '#facc15');
-          OrbitalAudio.sfx.collectOre(game.combo);
-          if (goalMet()) { completeLevel(); return; }
+          OrbitalAudio.sfx.collectOre(me.combo);
+          if (goalMet()) { completeLevel(game.level.goal.type === 'race' ? me : null); return; }
           if (raceCheck()) return;
         }
       }
@@ -642,7 +690,7 @@
       if (rocket.dead) return;
       rocket.dead = true; rocket.respawnTimer = 150; rocket.heat = 0;
       rocket.thrusting = false; rocket.boosting = false;
-      game.lives--; game.combo = 0; game.comboTimer = 0; game.deathReason = reason;
+      me.lives--; me.combo = 0; me.comboTimer = 0; me.deathReason = reason;
       explode(rocket.x, rocket.y, rocket.vx, rocket.vy);
       camera.shake = 22;
       popup(rocket.x, rocket.y - 6, reason.toUpperCase(), '#ff5252', 16);
@@ -651,16 +699,19 @@
     }
 
     function handleRespawn() {
-      if (!rocket.dead) return;
+      if (!rocket.dead || me.out) return;
       rocket.respawnTimer--;
       if (rocket.respawnTimer > 0) return;
-      if (game.lives > 0) {
+      if (me.lives > 0) {
         spawnRocket();
         rocket.fuel = Math.max(rocket.fuel, START_FUEL);
-        popup(rocket.x, rocket.y - 8, `${game.lives} ${game.lives === 1 ? 'LIFE' : 'LIVES'} LEFT`, '#4fc3f7');
+        popup(rocket.x, rocket.y - 8, `${me.lives} ${me.lives === 1 ? 'LIFE' : 'LIVES'} LEFT`, me.color);
         OrbitalAudio.sfx.respawn();
+      } else if (players.some(p => p !== me && !p.out && (p.lives > 0 || !p.ship.dead))) {
+        me.out = true;   // the other pilot flies on alone
+        popup(rocket.x, rocket.y - 8, `${me.name} IS OUT OF SHIPS`, me.color, 12);
       } else {
-        endGame(game.deathReason);
+        endGame(me.deathReason);
       }
     }
 
@@ -689,6 +740,7 @@
         r.fuel = L.startFuel || START_FUEL;
         rivals.push(r);
         rival = r; spawnRival();
+        if (R.delay > 0) { r.dead = true; r.respawnTimer = R.delay; r.launched = false; }   // a head start for the player: it launches later
       });
       rival = rivals[0] || null;
     }
@@ -768,6 +820,7 @@
       if (--rival.respawnTimer > 0) return;
       spawnRival();
       rival.fuel = Math.max(rival.fuel, START_FUEL);
+      if (!rival.launched) { rival.launched = true; popup(rival.x, rival.y - 6, `${rival.name} LAUNCHED`, rival.color, 12); }
     }
 
     // ---------- The rival's pilot ----------
@@ -1139,7 +1192,8 @@
 
     // ---------- Game flow ----------
     function newGame(levelIdx) {
-      game.inRun = true; game.score = 0; game.lives = START_LIVES; rocket.fuel = START_FUEL;
+      game.inRun = true; game.score = 0;
+      for (const P of players) { P.lives = START_LIVES; P.ship.fuel = START_FUEL; }
       startLevel(levelIdx);
     }
 
@@ -1147,18 +1201,22 @@
       const L = idx >= 0 ? LEVELS[idx] : custom.level;
       game.levelIndex = idx; game.level = L;
       game.ore = 0; game.timeLeft = L.time; game.lastSec = -1; game.hot = false;
-      game.combo = 0; game.comboTimer = 0; game.ticks = 0; game.stateTimer = 0; game.deathReason = '';
-      game.nav = true; ui.boost = false; ui.charge = false; pressedButton = null;
+      game.ticks = 0; game.stateTimer = 0; pressedButton = null;
       buildLevel(L);
-      spawnRocket();
-      rocket.fuel = Math.max(rocket.fuel, L.startFuel || START_FUEL);
       setupRivals(L);
       game.raceTotal = ores.length;
       const home = homePlanet();
-      camera.follow = true; camera.zoomMul = 1; camera.scale = L.nearZoom || NEAR_ZOOM; camera.shake = 0;
-      camera.focusX = home.x; camera.focusY = home.y;
-      camera.offsetX = -home.x * camera.scale; camera.offsetY = -home.y * camera.scale;
-      computePrediction();
+      for (const P of players) {
+        usePlayer(P);
+        P.ore = 0; P.combo = 0; P.comboTimer = 0; P.deathReason = ''; P.out = false; P.nav = true; ui.boost = false; ui.charge = false;
+        spawnRocket();
+        rocket.fuel = Math.max(rocket.fuel, L.startFuel || START_FUEL);
+        camera.follow = true; camera.zoomMul = 1; camera.scale = L.nearZoom || NEAR_ZOOM; camera.shake = 0;
+        camera.focusX = home.x; camera.focusY = home.y;
+        camera.offsetX = -home.x * camera.scale; camera.offsetY = -home.y * camera.scale;
+        computePrediction();
+      }
+      usePlayer(players[0]);
       game.state = GAME_STATE.LEVEL_INTRO;
       startButton.style.display = 'none';
       OrbitalAudio.setIntensity(0);
@@ -1171,22 +1229,22 @@
       OrbitalAudio.sfx.select();
     }
 
-    function goalMet() {
+    function goalMet() {   // the players share ore quotas and visits; in a race each ship's own tally counts
       const g = game.level.goal;
       if (g.type === 'ore') return game.ore >= g.count;
-      if (g.type === 'race') return game.ore * 2 > game.raceTotal;   // more than half: the rival can no longer catch up
+      if (g.type === 'race') return me.ore * 2 > game.raceTotal;   // more than half: nobody can catch up
       return planets.every(p => p.collected > 0);
     }
     function goalProgress() {
       const g = game.level.goal;
       if (g.type === 'ore') return game.ore / g.count;
-      if (g.type === 'race') return game.ore / (Math.floor(game.raceTotal / 2) + 1);
+      if (g.type === 'race') return me.ore / (Math.floor(game.raceTotal / 2) + 1);
       return planets.filter(p => p.collected > 0).length / planets.length;
     }
     function goalText() {
       const g = game.level.goal;
-      if (g.type === 'ore') return `ORE  ${game.ore} / ${g.count}`;
-      if (g.type === 'race') return `YOU  ${game.ore}     ${rivals.map(r => `${r.name}  ${r.ore}`).join('     ')}     ·   ${ores.length} LEFT`;
+      if (g.type === 'ore') return `ORE  ${game.ore} / ${g.count}` + (players.length > 1 ? `   ·   ${me.name}  ${me.ore}` : '');
+      if (g.type === 'race') return `YOU  ${me.ore}     ${rivals.map(r => `${r.name}  ${r.ore}`).join('     ')}     ·   ${ores.length} LEFT`;
       return planets.map(p => (p.collected > 0 ? '✓ ' : '○ ') + p.name.toUpperCase()).join('   ');
     }
     // Race levels end as soon as the outcome is settled. True when this call ended the level.
@@ -1194,15 +1252,15 @@
     function raceCheck() {
       if (game.level.goal.type !== 'race' || game.state !== GAME_STATE.PLAYING) return false;
       const total = game.raceTotal, lead = leadingRival();
-      if (game.ore * 2 > total) { completeLevel(); return true; }
+      for (const P of players) if (P.ore * 2 > total) { completeLevel(P); return true; }
       if (lead && lead.ore * 2 > total) { endGame(`Out-mined by ${lead.name}`); return true; }
       if (ores.length === 0) { raceFinish(); return true; }
       return false;
     }
-    function raceFinish() {   // no ore left, or time up: whoever holds most wins; a tie goes to the rival
-      const lead = leadingRival();
-      if (!lead || game.ore > lead.ore) completeLevel();
-      else endGame(game.ore === lead.ore ? `Tied with ${lead.name}` : `Out-mined by ${lead.name}`);
+    function raceFinish() {   // no ore left, or time up: whoever holds most wins; a tie goes to the rival, and between players it is a draw
+      const lead = leadingRival(), order = players.slice().sort((a, b) => b.ore - a.ore), top = order[0];
+      if (lead && lead.ore >= top.ore) endGame(lead.ore === top.ore ? `Tied with ${lead.name}` : `Out-mined by ${lead.name}`);
+      else completeLevel(order.length > 1 && order[1].ore === top.ore ? null : top);
     }
     function oresLeft(p) { let n = 0; for (const o of ores) if (o.planet === p) n++; return n; }
     function findTarget() {
@@ -1217,11 +1275,12 @@
       return best;
     }
 
-    function completeLevel() {
+    function completeLevel(winner) {   // winner: the player who won a race (null: a draw, or not a race)
       const timeBonus = Math.floor(game.timeLeft) * TIME_BONUS_PER_SECOND;
-      game.stats = { ore: game.ore, timeLeft: game.timeLeft, timeBonus, levelBonus: LEVEL_BONUS, rivalOres: rivals.map(r => ({ name: r.name, ore: r.ore })) };
+      game.stats = { ore: game.ore, ores: players.map(p => ({ name: p.name, ore: p.ore })), winner: winner ? winner.name : null,
+                     timeLeft: game.timeLeft, timeBonus, levelBonus: LEVEL_BONUS, rivalOres: rivals.map(r => ({ name: r.name, ore: r.ore })) };
       game.score += timeBonus + LEVEL_BONUS;
-      game.lives = Math.min(MAX_LIVES, game.lives + 1);
+      for (const P of players) P.lives = Math.min(MAX_LIVES, P.lives + 1);
       updateHighScore();
       if (game.levelIndex >= 0) {   // custom systems do not count towards the campaign
         maxLevelReached = Math.max(maxLevelReached, Math.min(game.levelIndex + 1, LEVELS.length - 1));
@@ -1230,7 +1289,7 @@
         localStorage.setItem('orbitalCleared', cleared);
       }
       game.state = GAME_STATE.LEVEL_COMPLETE; game.stateTimer = 0;
-      rocket.thrusting = false; rocket.boosting = false;
+      for (const P of players) { P.ship.thrusting = false; P.ship.boosting = false; }
       for (let i = 0; i < 6; i++) sparkle(rocket.x + (Math.random() - 0.5) * 20, rocket.y + (Math.random() - 0.5) * 20, ['#facc15', '#4ade80', '#4fc3f7'][i % 3]);
       OrbitalAudio.stopMusic();
       OrbitalAudio.sfx.levelComplete();
@@ -1253,7 +1312,7 @@
       updateHighScore(); game.inRun = false;
       game.gameOverReason = reason;
       game.state = GAME_STATE.GAME_OVER; game.stateTimer = 0;
-      rocket.thrusting = false; rocket.boosting = false;
+      for (const P of players) { P.ship.thrusting = false; P.ship.boosting = false; }
       OrbitalAudio.stopMusic();
       OrbitalAudio.sfx.gameOver();
       OrbitalAudio.setIntensity(0);
@@ -1279,22 +1338,43 @@
       OrbitalAudio.startMusic('ambient');
       if (map.travel) OrbitalAudio.sfx.warp();
     }
-    function mapStarPos(i) {   // the systems snake across the screen in two or three rows
-      const n = LEVELS.length, rows = n > 14 ? 3 : 2, cols = Math.ceil(n / rows);
-      const row = Math.floor(i / cols), k = i - row * cols;
+    const MAP_PER_PAGE = 24;   // systems per page of the star map: a sector
+    function mapPage(i) { return Math.floor(i / MAP_PER_PAGE); }
+    function mapPages() { return Math.ceil(LEVELS.length / MAP_PER_PAGE); }
+    function mapShownPage() {   // the sector on screen: the one being flown into, an explicit choice, or the chosen system's
+      const T = map.travel;
+      if (T && mapPage(T.from) !== mapPage(T.to)) return smoothstep(T.t) < 0.5 ? mapPage(T.from) : mapPage(T.to);
+      return map.page === null ? mapPage(map.selected) : map.page;
+    }
+    function mapFlip(delta) {   // show another sector, choosing its furthest unlocked system if it has one
+      if (map.travel) return;
+      const page = clamp(mapShownPage() + delta, 0, mapPages() - 1);
+      if (page === mapShownPage()) return;
+      const first = page * MAP_PER_PAGE, last = Math.min(first + MAP_PER_PAGE, LEVELS.length) - 1;
+      if (first <= maxLevelReached) { map.selected = Math.min(last, maxLevelReached); map.page = null; }
+      else map.page = page;
+      OrbitalAudio.sfx.select();
+    }
+    function mapStarPos(i) {   // the systems of a sector snake across the screen in two or three rows
+      const first = mapPage(i) * MAP_PER_PAGE, n = Math.min(MAP_PER_PAGE, LEVELS.length - first), rows = n > 14 ? 3 : 2, cols = Math.ceil(n / rows);
+      const j = i - first, row = Math.floor(j / cols), k = j - row * cols;
       const c = row % 2 === 0 ? k : cols - 1 - k;
       const short = H < 520, rowY = rows === 3 ? (short ? [0.22, 0.36, 0.50] : [0.28, 0.47, 0.66]) : (short ? [0.30, 0.50] : [0.40, 0.64]);
       return { x: W * (0.12 + 0.76 * c / Math.max(1, cols - 1)), y: H * rowY[row] + (short ? 6 : 14) * Math.sin(i * 2.1) };
     }
     function mapStarStyle(i) { return Object.assign({}, DEFAULT_STAR, LEVELS[i].star || {}); }
-    function travelPos(T, k) {   // a gentle arc between two systems
-      const A = mapStarPos(T.from), B = mapStarPos(T.to);
+    function travelPos(T, k) {   // a gentle arc between two systems; between sectors it leaves at the right and comes in from the left
+      let A = mapStarPos(T.from), B = mapStarPos(T.to);
+      if (mapPage(T.from) !== mapPage(T.to)) {
+        if (k < 0.5) { B = { x: W + 60, y: A.y }; k *= 2; } else { A = { x: -60, y: B.y }; k = (k - 0.5) * 2; }
+      }
       const dx = B.x - A.x, dy = B.y - A.y, len = Math.hypot(dx, dy) || 1;
       const bulge = len * 0.18 * Math.sin(Math.PI * k);
       return { x: A.x + dx * k - dy / len * bulge, y: A.y + dy * k + dx / len * bulge };
     }
     function mapStarAt(x, y) {
-      for (let i = 0; i <= maxLevelReached && i < LEVELS.length; i++) {
+      const page = mapShownPage();
+      for (let i = page * MAP_PER_PAGE; i <= maxLevelReached && i < LEVELS.length && mapPage(i) === page; i++) {
         const p = mapStarPos(i);
         if (Math.hypot(p.x - x, p.y - y) < 24) return i;
       }
@@ -1302,7 +1382,7 @@
     }
     function selectStar(i) {
       if (map.travel || i < 0 || i > maxLevelReached || i >= LEVELS.length || i === map.selected) return;
-      map.selected = i;
+      map.selected = i; map.page = null;
       OrbitalAudio.sfx.select();
     }
     function launchSelected() {
@@ -1334,11 +1414,25 @@
     // The player picks a planet count, how spread out the system is, how many rivals fly and how good they are.
     // A system is generated from those choices and a seed, then played like any other level (index -1).
     const CUSTOM_SIZES = [   // gap: typical spacing between orbits; perPlanet: seconds of time limit each world adds
-      { label: 'COMPACT', gap: 65,  zoom: 1.5, theme: 'storm', perPlanet: 25, star: { radius: 22, color: '#fbbf24', mass: 700000, luminosity: 1.2, heatRadius: 55 } },
-      { label: 'CLOSE',   gap: 100, zoom: 1.6, theme: 'drive', perPlanet: 30, star: { radius: 24, color: '#fbbf24', mass: 800000, luminosity: 1.1, heatRadius: 70 } },
-      { label: 'ROOMY',   gap: 160, zoom: 2.2, theme: 'epic',  perPlanet: 40, star: {} },
-      { label: 'WIDE',    gap: 260, zoom: 3,   theme: 'deep',  perPlanet: 50, star: {} },
-      { label: 'VAST',    gap: 420, zoom: 0,   theme: 'deep',  perPlanet: 60, star: { radius: 28, color: '#fef3c7', mass: 1100000, luminosity: 0.8, heatRadius: 130 } },
+      { label: 'COMPACT', gap: 65,  zoom: 1.5, theme: 'storm', perPlanet: 25 },
+      { label: 'CLOSE',   gap: 100, zoom: 1.6, theme: 'drive', perPlanet: 30 },
+      { label: 'ROOMY',   gap: 160, zoom: 2.2, theme: 'epic',  perPlanet: 40 },
+      { label: 'WIDE',    gap: 260, zoom: 3,   theme: 'deep',  perPlanet: 50 },
+      { label: 'VAST',    gap: 420, zoom: 0,   theme: 'deep',  perPlanet: 60 },
+    ];
+    const CUSTOM_STAR_TYPES = [   // the star sets how hard the system pulls, how fast worlds orbit, how far the heat reaches and how well solar panels work
+      { label: 'RED DWARF',   blurb: 'dim and gentle: slow orbits, weak solar power',       star: { radius: 16, color: '#f87171', mass: 400000,  luminosity: 0.35, heatRadius: 50 } },
+      { label: 'ORANGE',      blurb: 'a small warm star with a modest heat zone',           star: { radius: 22, color: '#fbbf24', mass: 700000,  luminosity: 0.9,  heatRadius: 70 } },
+      { label: 'YELLOW',      blurb: 'a sun like ours',                                     star: { radius: 30, color: '#fde047', mass: 1000000, luminosity: 1,    heatRadius: 120 } },
+      { label: 'WHITE',       blurb: 'hot and heavy: fast orbits, strong solar power',      star: { radius: 34, color: '#f8fafc', mass: 1500000, luminosity: 1.6,  heatRadius: 160 } },
+      { label: 'BLUE GIANT',  blurb: 'huge gravity and a vast heat zone; solar power galore', star: { radius: 60, color: '#60a5fa', mass: 3000000, luminosity: 2.5,  heatRadius: 260 } },
+      { label: 'WHITE DWARF', blurb: 'tiny, dense and dim: worlds whip round close in',     star: { radius: 9,  color: '#e0f2fe', mass: 1200000, luminosity: 0.5,  heatRadius: 40 } },
+    ];
+    const CUSTOM_DELAYS = [0, 30, 60, 90, 120, 180];   // seconds of head start before the rivals launch
+    const CUSTOM_NAV = [   // how the nav AI that draws your flight path is powered
+      { label: 'FREE',    blurb: 'the flight path is always on' },
+      { label: 'BATTERY', blurb: 'the flight path drains the battery; solar panels and fuel recharge it' },
+      { label: 'OFFLINE', blurb: 'no flight path at all: fly by eye' },
     ];
     const CUSTOM_SKILLS = [   // rival handicaps, from a dawdling old ship to a match for yours
       { label: 'ROOKIE',  thrust: 0.6,  turn: 0.6,  pause: 600, linger: 300 },
@@ -1347,17 +1441,21 @@
       { label: 'ACE',     thrust: 1,    turn: 1,    pause: 0,   linger: 0 },
     ];
     const CUSTOM_ROWS = [
-      { key: 'planets', label: 'PLANETS',     min: 2, max: 12,                        text: v => `${v}` },
-      { key: 'size',    label: 'SYSTEM SIZE', min: 0, max: CUSTOM_SIZES.length - 1,   text: v => CUSTOM_SIZES[v].label },
-      { key: 'rivals',  label: 'RIVALS',      min: 0, max: RIVAL_LOOKS.length,        text: v => v === 0 ? 'NONE' : `${v}` },
-      { key: 'skill',   label: 'RIVAL SKILL', min: 0, max: CUSTOM_SKILLS.length - 1,  text: v => CUSTOM_SKILLS[v].label },
+      { key: 'planets', label: 'PLANETS',     min: 2, max: 12,                           text: v => `${v}` },
+      { key: 'size',    label: 'SYSTEM SIZE', min: 0, max: CUSTOM_SIZES.length - 1,      text: v => CUSTOM_SIZES[v].label },
+      { key: 'star',    label: 'STAR',        min: 0, max: CUSTOM_STAR_TYPES.length - 1, text: v => CUSTOM_STAR_TYPES[v].label, color: v => CUSTOM_STAR_TYPES[v].star.color },
+      { key: 'rivals',  label: 'RIVALS',      min: 0, max: RIVAL_LOOKS.length,           text: v => v === 0 ? 'NONE' : `${v}` },
+      { key: 'skill',   label: 'RIVAL SKILL', min: 0, max: CUSTOM_SKILLS.length - 1,     text: v => CUSTOM_SKILLS[v].label },
+      { key: 'delay',   label: 'HEAD START',  min: 0, max: CUSTOM_DELAYS.length - 1,     text: v => v === 0 ? 'NONE' : `${CUSTOM_DELAYS[v]} S` },
+      { key: 'nav',     label: 'NAV AI',      min: 0, max: CUSTOM_NAV.length - 1,        text: v => CUSTOM_NAV[v].label },
     ];
+    const CUSTOM_PARAM = ['planets', 'size', 'rivals', 'skill', 'seed', 'star', 'nav', 'delay'];   // the order in ?custom=p,s,r,k,seed,star,nav,delay
     const CUSTOM_STARS = ['Kestrel', 'Vesper', 'Halcyon', 'Lantern', 'Orrery', 'Tamsin', 'Beacon', 'Mirage', 'Solace', 'Tallow', 'Wren', 'Cobalt'];
     const CUSTOM_WORLDS = ['Ash', 'Brine', 'Cinder', 'Dusk', 'Ember', 'Fen', 'Gale', 'Haze', 'Iron', 'Jade', 'Knoll', 'Loam',
                            'Moss', 'Nickel', 'Ochre', 'Pyre', 'Quill', 'Rime', 'Slate', 'Tarn', 'Umber', 'Vale', 'Wisp', 'Zinc'];
     const CUSTOM_COLORS = ['#d4d4d8', '#a8a29e', '#4ade80', '#fb923c', '#94a3b8', '#fde047', '#f87171', '#e0e7ff',
                            '#c084fc', '#a5f3fc', '#f59e0b', '#e879f9', '#818cf8', '#2dd4bf', '#fca5a5', '#bef264'];
-    const custom = { row: 0, planets: 6, size: 1, rivals: 1, skill: 1, seed: 1, level: null, rows: [], hit: [] };
+    const custom = { row: 0, planets: 6, size: 1, star: 1, rivals: 1, skill: 1, delay: 0, nav: 1, seed: 1, level: null, rows: [], hit: [] };
     CUSTOM_ROWS.forEach((row, i) => {   // clickable arrows either side of each value, and the row itself
       custom.rows.push({ x: 0, y: 0, w: 0, h: 0, row: i, press() { custom.row = i; }, release() {} });
       for (const delta of [-1, 1]) custom.hit.push({ x: 0, y: 0, w: 0, h: 0, row: i, delta, press() { custom.row = i; customChange(delta); }, release() {} });
@@ -1378,9 +1476,9 @@
     function makeCustomLevel(c) {
       const rnd = seededRandom(c.seed * 1000003 + c.planets * 7919 + c.size * 131);
       const take = list => list.splice(Math.floor(rnd() * list.length), 1)[0];
-      const size = CUSTOM_SIZES[c.size], skill = CUSTOM_SKILLS[c.skill];
-      const n = c.planets, k = Math.min(c.rivals, n - 1);
-      const star = Object.assign({ name: take(CUSTOM_STARS.slice()) }, size.star), S = Object.assign({}, DEFAULT_STAR, star);
+      const size = CUSTOM_SIZES[c.size], skill = CUSTOM_SKILLS[c.skill], type = CUSTOM_STAR_TYPES[c.star], nav = CUSTOM_NAV[c.nav];
+      const n = c.planets, k = Math.min(c.rivals, n - 1), delay = c.name ? (c.delay || 0) : CUSTOM_DELAYS[c.delay || 0];   // seconds; campaign systems give it directly
+      const star = Object.assign({ name: c.name || take(CUSTOM_STARS.slice()) }, type.star), S = Object.assign({}, DEFAULT_STAR, star);
       const names = CUSTOM_WORLDS.slice(), colors = CUSTOM_COLORS.slice();
       const home = Math.min(n - 1, Math.round((n - 1) / 3));   // your world sits a third of the way out
       const others = [];   // rival homes: the worlds farthest from yours, kept apart from each other where possible
@@ -1389,31 +1487,57 @@
       const rivalHomes = [];
       for (const i of others) if (rivalHomes.length < k && rivalHomes.every(j => Math.abs(j - i) >= 2)) rivalHomes.push(i);
       for (const i of others) if (rivalHomes.length < k && !rivalHomes.includes(i)) rivalHomes.push(i);
+      const retro = new Set();   // campaign systems may ask for some worlds to orbit the other way (never the home worlds)
+      for (let tries = 0; retro.size < (c.retro || 0) && tries < 50; tries++) { const i = Math.floor(rnd() * n); if (i !== home && !rivalHomes.includes(i)) retro.add(i); }
       const planets = [];
-      let d = S.heatRadius * 2, total = 0;
+      let d = Math.max(S.heatRadius * 2, S.radius * 4), total = 0;
       for (let i = 0; i < n; i++) {
         if (i > 0) d += size.gap * (0.85 + rnd() * 0.3);
         const isHome = i === home, rh = rivalHomes.indexOf(i);
         const radius = isHome || rh >= 0 ? 8 : [4, 5, 5, 6, 6, 7, 7, 8, 9, 10][Math.floor(rnd() * 10)];
         const ore = radius >= 8 ? 6 : radius >= 6 ? 5 : radius >= 5 ? 4 : 3;
-        const fuel = isHome || rh >= 0 ? 8 : 3 + (radius >= 7 ? 1 : 0) + (rnd() < 0.5 ? 1 : 0);
+        const fuel = c.dry ? 0 : isHome || rh >= 0 ? 8 : 3 + (radius >= 7 ? 1 : 0) + (rnd() < 0.5 ? 1 : 0);
         total += ore;
         planets.push({ name: take(names), radius, distance: Math.round(d), color: isHome ? '#3b82f6' : take(colors),
-                       home: isHome, rivalHome: rh >= 0 ? rh : undefined, ore, fuel, startAngle: +((i * 2.4 + rnd() * 0.8) % (Math.PI * 2)).toFixed(2) });
+                       home: isHome, rivalHome: rh >= 0 ? rh : undefined, retro: retro.has(i) || undefined, ore, fuel,
+                       startAngle: +((i * 2.4 + rnd() * 0.8) % (Math.PI * 2)).toFixed(2) });
       }
-      const goal = k ? { type: 'race' } : { type: 'ore', count: Math.max(5, Math.ceil(total * 0.6)) };
-      const time = clamp(Math.round((120 + n * size.perPlanet) / 30) * 30, 180, 900);
+      const belts = [];   // asteroid belts, each in a gap between two orbits (campaign systems only)
+      if (c.belts && n > 2) {
+        const gaps = []; for (let i = 1; i < n; i++) gaps.push(i);
+        for (let b = 0; b < c.belts && gaps.length; b++) {
+          const i = gaps.splice(Math.floor(rnd() * gaps.length), 1)[0], a = planets[i - 1].distance, z = planets[i].distance;
+          const inner = Math.round(a + (z - a) * 0.28), outer = Math.round(a + (z - a) * 0.78);
+          belts.push({ count: Math.round(clamp(Math.PI * (outer * outer - inner * inner) / 15000, 16, 90)), inner, outer });
+        }
+      }
+      const quota = c.quota !== undefined ? c.quota : 0.6;
+      const goal = k ? { type: 'race' } : c.visit ? { type: 'visit' } : { type: 'ore', count: Math.max(5, Math.ceil(total * quota)) };
+      const time = (c.time || clamp(Math.round((120 + n * size.perPlanet) / 30) * 30, 180, 900)) + (k ? delay : 0);
+      const rivalCount = k > 1 ? `${k} rival prospectors` : 'a rival prospector';
       return {
-        name: star.name.toUpperCase(), theme: size.theme, battery: true, nearZoom: size.zoom || undefined, custom: true, star,
-        rivals: Array.from({ length: k }, () => ({ thrust: skill.thrust, turn: skill.turn, pause: skill.pause, linger: skill.linger })),
-        brief: k ? `${n} worlds and ${k} rival prospector${k > 1 ? 's' : ''}. Finish with more ore than ${k > 1 ? 'any of them' : 'it'}.`
-                 : `${n} worlds around ${star.name}. Collect ${goal.count} of their ${total} ore.`,
-        hint: k > 1 ? 'The rival ships mine the same belts. Every ore they take is one you cannot.'
+        name: star.name.toUpperCase(), theme: c.theme || size.theme, battery: nav.label === 'BATTERY', noNav: nav.label === 'OFFLINE' || undefined,
+        nearZoom: size.zoom || undefined, custom: !c.name, star, startFuel: c.dry ? 400 : undefined, asteroids: belts.length ? belts : undefined,
+        rivals: Array.from({ length: k }, () => ({ thrust: skill.thrust, turn: skill.turn, pause: skill.pause, linger: skill.linger, delay: delay * 60 })),
+        brief: c.brief || (k ? `${n} worlds and ${rivalCount}. Finish with more ore than ${k > 1 ? 'any of them' : 'it'}.`
+                 : goal.type === 'visit' ? `${n} worlds around ${star.name}. Collect one ore from each.`
+                 : `${n} worlds around ${star.name}. Collect ${goal.count} of their ${total} ore.`),
+        hint: c.hint || (k > 1 ? 'The rival ships mine the same belts. Every ore they take is one you cannot.'
             : k ? 'The pink ship mines the same belts. Every ore it takes is one you cannot.'
-            : 'Every world pulls on you. Short burns go a long way.',
-        notes: k ? [`RIVAL SKILL: ${skill.label}. Hold more than half the ore to win outright, or lead when time runs out.`] : undefined,
+            : 'Every world pulls on you. Short burns go a long way.'),
+        notes: c.notes || (k ? [`RIVAL SKILL: ${skill.label}.${delay ? ` The rivals launch ${delay} s after you.` : ''}`, 'Hold more than half the ore to win outright, or lead when time runs out.'] : undefined),
         goal, time, planets, oreTotal: total, skill: skill.label,
       };
+    }
+    function applyCustomParam(str) {   // ?custom=planets,size,rivals,skill[,seed,star,nav]
+      const v = String(str).split(',').map(Number);
+      CUSTOM_PARAM.forEach((key, i) => {
+        if (isNaN(v[i])) return;
+        if (key === 'seed') { if (v[i] > 0) custom.seed = v[i]; return; }
+        const row = CUSTOM_ROWS.find(r => r.key === key);
+        custom[key] = clamp(Math.round(v[i]), row.min, row.max);
+      });
+      custom.level = makeCustomLevel(custom);
     }
     function openCustom() {
       game.state = GAME_STATE.CUSTOM; game.stateTimer = 0; game.level = null; game.inRun = false;
@@ -1432,7 +1556,7 @@
     }
     function customShuffle() { custom.seed = Math.floor(Math.random() * 1e6) + 1; custom.level = makeCustomLevel(custom); OrbitalAudio.sfx.select(); }
     function launchCustom() {
-      try { localStorage.setItem('orbitalCustom', JSON.stringify({ planets: custom.planets, size: custom.size, rivals: custom.rivals, skill: custom.skill, seed: custom.seed })); } catch (e) {}
+      try { const saved = { seed: custom.seed }; for (const row of CUSTOM_ROWS) saved[row.key] = custom[row.key]; localStorage.setItem('orbitalCustom', JSON.stringify(saved)); } catch (e) {}
       newGame(-1);
     }
     function loadCustom() {
@@ -1444,8 +1568,128 @@
       } catch (e) {}
     }
 
+    // ---------- Sectors 2 and 3 ----------
+    // Fifty more systems beyond Omega, built by the custom generator from fixed seeds so they are the same
+    // for everyone: planets, size (0 compact .. 4 vast), star type (0 red dwarf .. 5 white dwarf), rivals and
+    // their skill (0 rookie .. 3 ace), nav (0 free, 1 battery, 2 offline), plus belts, retro worlds, dry (no
+    // fuel depots), a visit goal or an ore quota, and a time limit.
+    function sector(name, c) { return makeCustomLevel(Object.assign({ name, planets: 6, size: 1, star: 2, rivals: 0, skill: 1, nav: 1, seed: 1 }, c)); }
+    const RACE_NOTE = 'Hold more than half the ore to win outright, or lead when time runs out.';
+    LEVELS.push(
+      // ---- Sector 2: the frontier (levels 23-48) ----
+      sector('SABLE', { planets: 4, size: 2, star: 1, seed: 1101, theme: 'calm', quota: 0.6,
+        brief: 'Beyond Omega lies the frontier. Four quiet worlds to warm up on.', hint: 'An orange star: a modest heat zone and fair solar power. Collect the quota and move on.' }),
+      sector('TWO-STEP', { delay: 20, planets: 5, size: 1, star: 2, rivals: 2, skill: 0, seed: 1102, theme: 'drive',
+        brief: 'Two rookie prospectors want the same ore you do. Out-mine both.', hint: 'Rookies fly slow and dawdle over every find. Take the inner belts before they wake up.',
+        notes: ['Rivals start on the worlds farthest from yours.', RACE_NOTE] }),
+      sector('CINDERS', { planets: 6, size: 0, star: 0, seed: 1103, theme: 'dusk', quota: 0.55,
+        brief: 'Six worlds huddled round a dim red dwarf. Collect the quota.', hint: 'A red dwarf gives almost no solar power. Burn fuel to recharge, or fly dark.',
+        notes: ['RED DWARF: weak gravity, slow orbits, feeble sunlight. Planets this close pull on each other: idle orbits decay.'] }),
+      sector('TRIPLE THREAT', { delay: 30, planets: 7, size: 1, star: 1, rivals: 3, skill: 0, seed: 1104, theme: 'drive',
+        brief: 'Three rookies, seven worlds. Finish with the most ore.', hint: 'With three ships against you the ore goes fast. Keep moving between worlds.' }),
+      sector('KILN', { planets: 5, size: 2, star: 4, belts: 1, seed: 1105, theme: 'heat', quota: 0.6,
+        brief: 'A blue giant and a belt of rock between its worlds. Collect the quota.', hint: 'The heat zone is enormous and orbits are fast. Solar power is never a problem here.',
+        notes: ['BLUE GIANT: huge gravity, a vast heat zone, and solar panels that charge in seconds.'] }),
+      sector('QUARTET', { delay: 40, planets: 8, size: 1, star: 2, rivals: 4, skill: 0, seed: 1106, theme: 'drive',
+        brief: 'Four rookie prospectors spread across eight worlds. Beat them all.', hint: 'The field is crowded. Watch the tally and go where the rivals are not.' }),
+      sector('WRONG WAY', { planets: 6, size: 2, star: 2, retro: 2, visit: true, time: 420, seed: 1107, theme: 'storm',
+        brief: 'Two of these six worlds orbit backwards. Collect one ore from each world.', hint: 'Meeting a retrograde world head-on is fast and deadly. Match its direction before you arrive.' }),
+      sector('RELAY', { delay: 40, planets: 9, size: 1, star: 1, rivals: 3, skill: 1, seed: 1108, theme: 'drive',
+        brief: 'Three cruisers work nine worlds. Finish with more ore than any of them.', hint: 'Cruisers plan real transfers. Sweep a belt clean before they arrive.' }),
+      sector('DARK LANTERN', { planets: 5, size: 1, star: 5, nav: 2, time: 330, seed: 1109, theme: 'void', quota: 0.6,
+        brief: 'A white dwarf, a dead nav AI, five fast little worlds. Collect the quota.', hint: 'No flight path. The star is tiny but heavy: orbits are quick and tight.',
+        notes: ['WHITE DWARF: small, dense and dim. Worlds whip round it close in.'] }),
+      sector('HALF DOZEN', { delay: 60, planets: 10, size: 0, star: 1, rivals: 6, skill: 0, seed: 1110, theme: 'storm',
+        brief: 'Six rookies in a compact system of ten worlds. Beat every one of them.', hint: 'Six ships means the ore vanishes fast. Grab the nearest belts first and keep count.',
+        notes: ['SIX RIVALS. Their arrows crowd the screen edge; the tally shows who leads.', RACE_NOTE] }),
+      sector('CROSSFIRE', { delay: 30, planets: 7, size: 2, star: 2, rivals: 2, skill: 1, belts: 2, seed: 1111, theme: 'tense',
+        brief: 'Two cruisers, seven worlds and two belts of rock in the way.', hint: 'The rivals dodge asteroids by instinct. You have the nav AI, if the battery holds.' }),
+      sector('PROSPECT ROW', { delay: 45, planets: 12, size: 1, star: 2, rivals: 5, skill: 0, time: 480, seed: 1112, theme: 'epic',
+        brief: 'A dozen worlds and five rookie prospectors. Eight minutes to lead the field.', hint: 'Too many worlds to visit them all. Pick the rich ones close together.' }),
+      sector('SOLAR FORGE', { planets: 6, size: 1, star: 3, belts: 1, time: 360, seed: 1113, theme: 'heat', quota: 0.55,
+        brief: 'A white star, a belt of rock, and a big quota.', hint: 'A white star is hot and heavy: fast orbits, strong solar power, a wide heat zone.',
+        notes: ['WHITE STAR: brighter and heavier than our sun. Transfers are quick and captures are hard.'] }),
+      sector('SCRAMBLE', { delay: 75, planets: 8, size: 0, star: 1, rivals: 4, skill: 1, seed: 1114, theme: 'storm',
+        brief: 'Four cruisers in a compact system. Out-mine them all.', hint: 'Everything is close: short burns, quick captures, and rivals everywhere you look.' }),
+      sector('GHOST LIGHT', { planets: 7, size: 2, star: 0, nav: 2, visit: true, time: 540, seed: 1115, theme: 'void',
+        brief: 'Seven worlds in the dark around a red dwarf. One ore from each, flying by eye.', hint: 'No flight path and almost no light. Count your burns and watch the trail.' }),
+      sector('SIX PACK', { delay: 75, planets: 9, size: 1, star: 2, rivals: 6, skill: 1, seed: 1116, theme: 'drive',
+        brief: 'Six cruisers, nine worlds. Finish ahead of all of them.', hint: 'Cruisers pause after each capture. Hit a belt just as one arrives and strip it first.' }),
+      sector('LONG HAUL', { planets: 6, size: 4, star: 2, time: 840, seed: 1117, theme: 'deep', quota: 0.45,
+        brief: 'Six worlds flung far apart. Collect half the ore in thirteen minutes.', hint: 'Transits take minutes. Recharge near the star before each long coast.' }),
+      sector('VETERANS', { delay: 60, planets: 7, size: 1, star: 1, rivals: 3, skill: 2, seed: 1118, theme: 'tense',
+        brief: 'Three veteran prospectors. They fly almost as well as you.', hint: 'Veterans barely pause. Beat them on route choice, not speed.',
+        notes: ['VETERAN rivals: 90% thrust and turn rate, three-second pauses.'] }),
+      sector('EMPTY TANKS', { planets: 5, size: 1, star: 2, dry: true, seed: 1119, theme: 'deep', quota: 0.55,
+        brief: 'No fuel depots anywhere. Collect the quota on what you carry.', hint: 'Boosters and recharging both burn fuel. Fly on the main engine where you can.' }),
+      sector('GRAVEL', { delay: 45, planets: 8, size: 2, star: 2, rivals: 2, skill: 2, belts: 2, seed: 1120, theme: 'tense',
+        brief: 'Two veterans and two belts of gravel across the lanes.', hint: 'Cross a belt slowly, where the rocks are sparse. The veterans will not wait for you.' }),
+      sector('GIANT\'S YARD', { delay: 60, planets: 9, size: 1, star: 4, rivals: 4, skill: 1, seed: 1121, theme: 'epic',
+        brief: 'Nine worlds in the grip of a blue giant, and four cruisers mining them.', hint: 'Orbits are fast around a giant. Captures need a hard brake, so keep your fuel up.' }),
+      sector('BLIND RACE', { delay: 60, planets: 6, size: 1, star: 2, rivals: 3, skill: 1, nav: 2, seed: 1122, theme: 'void',
+        brief: 'Three cruisers and no nav AI. Out-mine them by eye.', hint: 'The rivals never had a flight path. Now neither do you.' }),
+      sector('CAROUSEL', { planets: 10, size: 0, star: 5, visit: true, time: 480, seed: 1123, theme: 'storm',
+        brief: 'Ten tiny worlds whipping round a white dwarf. Collect one ore from each.', hint: 'Orbits here last seconds. Time your hops so the next world comes to you.' }),
+      sector('PILE-ON', { delay: 90, planets: 11, size: 1, star: 1, rivals: 6, skill: 1, seed: 1124, theme: 'drive',
+        brief: 'Eleven worlds, six cruisers. Lead the field when the ore runs out.', hint: 'With this many ships the race ends fast. Every ore counts.' }),
+      sector('ACE HIGH', { delay: 90, planets: 5, size: 1, star: 2, rivals: 1, skill: 3, seed: 1125, theme: 'tense',
+        brief: 'One ace prospector: a ship as good as yours, flown without a pause.', hint: 'The ace never lingers. Beat it to the inner belts and never leave a world half-mined.',
+        notes: ['ACE rivals: full thrust and turn rate, no pauses.', RACE_NOTE] }),
+      sector('FRONTIER\'S END', { delay: 90, planets: 12, size: 2, star: 3, rivals: 5, skill: 2, belts: 1, time: 600, seed: 1126, theme: 'epic',
+        brief: 'Twelve worlds, five veterans, a belt and a white star. The frontier\'s last test.', hint: 'Ten minutes. Spread the rivals thin, then strip the worlds they left behind.' }),
+      // ---- Sector 3: the deep (levels 49-72) ----
+      sector('ABYSS', { planets: 6, size: 3, star: 0, seed: 1201, theme: 'deep', quota: 0.5,
+        brief: 'Six worlds spread wide around a red dwarf. Collect the quota in the dark.', hint: 'Far from a dim star the panels give nothing. Every recharge costs fuel.' }),
+      sector('DUST STORM', { planets: 8, size: 1, star: 2, belts: 3, time: 420, seed: 1202, theme: 'tense', quota: 0.45,
+        brief: 'Three belts of rock between eight worlds. Collect the quota.', hint: 'The nav AI shows the impacts. Keep it charged for every belt crossing.' }),
+      sector('WOLF PACK', { delay: 90, planets: 8, size: 0, star: 1, rivals: 5, skill: 2, seed: 1203, theme: 'storm',
+        brief: 'Five veterans in a compact system. Finish ahead of the pack.', hint: 'They will strip the inner belts in a minute. Start with the richest world you can reach.' }),
+      sector('RETRO RACE', { delay: 60, planets: 7, size: 1, star: 2, rivals: 3, skill: 1, retro: 3, seed: 1204, theme: 'storm',
+        brief: 'Three worlds orbit backwards and three cruisers are racing you for them.', hint: 'Arriving at a retrograde world the wrong way round means a head-on crash. Flip first.' }),
+      sector('STARVED', { planets: 7, size: 2, star: 0, dry: true, time: 600, seed: 1205, theme: 'dusk', quota: 0.35,
+        brief: 'A red dwarf and no fuel depots. Collect the quota on what you carry.', hint: 'No sunlight to speak of and no fuel to burn into charge. Fly dark and fly careful.' }),
+      sector('ACES', { delay: 90, planets: 6, size: 1, star: 2, rivals: 2, skill: 3, seed: 1206, theme: 'tense',
+        brief: 'Two aces. Out-mine both of them.', hint: 'Two perfect pilots split the system between them. Take the middle.' }),
+      sector('NEEDLE\'S EYE', { planets: 8, size: 1, star: 5, belts: 2, time: 420, seed: 1207, theme: 'storm', quota: 0.55,
+        brief: 'Eight worlds round a white dwarf, with two belts threaded between them.', hint: 'Fast orbits and rocks in the gaps. Thread the belts where they thin out.' }),
+      sector('WHITEOUT', { delay: 90, planets: 8, size: 2, star: 3, rivals: 4, skill: 2, belts: 1, seed: 1208, theme: 'epic',
+        brief: 'Four veterans under a white star, with a belt in the way.', hint: 'Fast transfers, hard captures, quick rivals. Use the boosters.' }),
+      sector('SILENT RUNNING', { delay: 75, planets: 8, size: 1, star: 1, rivals: 4, skill: 1, nav: 2, seed: 1209, theme: 'void',
+        brief: 'Four cruisers and no flight path. Beat them blind.', hint: 'Fly by trail and instinct. The rivals do not know you cannot see.' }),
+      sector('BLUE RUIN', { planets: 10, size: 0, star: 4, visit: true, time: 480, seed: 1210, theme: 'heat',
+        brief: 'Ten worlds huddled round a blue giant. One ore from each, if the heat lets you.', hint: 'The heat zone reaches almost to the first world. Never dip inside it.' }),
+      sector('STAMPEDE', { delay: 100, planets: 12, size: 1, star: 2, rivals: 6, skill: 2, time: 540, seed: 1211, theme: 'drive',
+        brief: 'Six veterans across twelve worlds. Nine minutes to lead the stampede.', hint: 'The rivals start far out and work inwards. Take the inner worlds first.' }),
+      sector('EMBER FIELD', { planets: 7, size: 1, star: 0, belts: 2, retro: 1, time: 420, seed: 1212, theme: 'dusk', quota: 0.5,
+        brief: 'A red dwarf, two belts, a backwards world, and a big quota.', hint: 'Seventy percent of the ore. You will need the outer worlds too.' }),
+      sector('HEAVYWEIGHT', { delay: 150, planets: 8, size: 2, star: 4, rivals: 3, skill: 3, seed: 1213, theme: 'epic',
+        brief: 'Three aces under a blue giant. Only the best pilot leads here.', hint: 'The giant pulls hard and the aces never rest. Fly clean.' }),
+      sector('DEAD RECKONING', { planets: 8, size: 2, star: 2, nav: 2, visit: true, time: 600, seed: 1214, theme: 'void',
+        brief: 'Eight worlds, one ore from each, and no nav AI to show the way.', hint: 'Long transfers by eye. Aim a little ahead of where the world will be.' }),
+      sector('FULL HOUSE', { delay: 180, planets: 12, size: 0, star: 1, rivals: 6, skill: 3, time: 480, seed: 1215, theme: 'storm',
+        brief: 'Twelve worlds, six aces, eight minutes. Lead when the ore runs out.', hint: 'The hardest race in the galaxy. Nobody pauses, nobody waits.' }),
+      sector('DASH', { planets: 3, size: 1, star: 3, time: 150, seed: 1216, theme: 'storm', quota: 0.6,
+        brief: 'Three worlds and two minutes. Collect three quarters of the ore.', hint: 'No time to coast. Boost between worlds and sweep both belts at each.' }),
+      sector('GRINDSTONE', { delay: 90, planets: 9, size: 1, star: 2, rivals: 3, skill: 2, belts: 3, seed: 1217, theme: 'tense',
+        brief: 'Three belts, three veterans, nine worlds.', hint: 'The rivals thread the rocks without a scratch. Cross where the belts thin.' }),
+      sector('SUNDIVER', { planets: 6, size: 0, star: 4, nav: 2, time: 360, seed: 1218, theme: 'heat', quota: 0.6,
+        brief: 'Six worlds skirting a blue giant\'s heat zone, and no nav AI.', hint: 'One wrong burn and you fall into the fire. Keep every orbit tidy.' }),
+      sector('FIVE ACES', { delay: 150, planets: 9, size: 1, star: 2, rivals: 5, skill: 3, seed: 1219, theme: 'tense',
+        brief: 'Five aces. Out-mine every one of them.', hint: 'They split the system five ways. Be the sixth, and the quickest.' }),
+      sector('THE LONG DARK', { planets: 6, size: 3, star: 0, dry: true, time: 900, seed: 1220, theme: 'deep', quota: 0.4,
+        brief: 'Six worlds flung across the void of a red dwarf. No fuel depots. Fifteen minutes.', hint: 'The longest haul of all. Main engine only, and plan each transfer twice.' }),
+      sector('HORNETS', { delay: 120, planets: 11, size: 0, star: 5, rivals: 6, skill: 2, belts: 0, seed: 1221, theme: 'storm',
+        brief: 'Eleven worlds packed round a white dwarf, and six angry veterans.', hint: 'Fast orbits and rivals everywhere. Stay low and strip the belts before the swarm arrives.' }),
+      sector('VOID RACE', { delay: 120, planets: 10, size: 2, star: 2, rivals: 4, skill: 2, nav: 2, seed: 1222, theme: 'void',
+        brief: 'Four veterans and no nav AI across ten worlds.', hint: 'Blind transfers against quick rivals. Trust the trail.' }),
+      sector('ALL COMERS', { delay: 180, planets: 12, size: 1, star: 3, rivals: 6, skill: 3, belts: 2, time: 600, seed: 1223, theme: 'epic',
+        brief: 'Twelve worlds, six aces, two belts, a white star. Everyone is here.', hint: 'Ten minutes to beat the best six pilots in the galaxy.' }),
+      sector('EVENT HORIZON', { delay: 150, planets: 12, size: 1, star: 4, rivals: 3, skill: 3, belts: 2, retro: 2, time: 720, seed: 1224, theme: 'epic',
+        brief: 'The last system. A blue giant, twelve worlds, two belts, two backwards worlds, three aces.', hint: 'Everything the galaxy has thrown at you, at once. Good luck, pilot.' }),
+    );
+
     function updateHighScore() {
-      if (game.levelIndex < 0) return;   // custom systems keep their scores to themselves
+      if (game.levelIndex < 0 || players.length > 1) return;   // custom systems and two-player runs keep their scores to themselves
       if (game.score > highScore) {
         highScore = game.score;
         localStorage.setItem('orbitalHighScore', highScore);
@@ -1464,7 +1708,7 @@
       if (game.timeLeft <= 0) { game.timeLeft = 0; if (game.level.goal.type === 'race') raceFinish(); else endGame('Out of time'); }
     }
     function updateCombo() {
-      if (game.comboTimer > 0 && --game.comboTimer === 0) game.combo = 0;
+      if (me.comboTimer > 0 && --me.comboTimer === 0) me.combo = 0;
     }
 
     // ---------- Input ----------
@@ -1475,14 +1719,15 @@
 
     function handleInput() {
       if (rocket.dead) return;
-      let turn = (keys['ArrowRight'] || keys['d'] ? 1 : 0) - (keys['ArrowLeft'] || keys['a'] ? 1 : 0);
-      let up = keys['ArrowUp'] || keys['w'];
-      if (joy.id !== null) {   // the touch stick: sideways turns in proportion to the push, forward thrusts
+      const K = me.keys;
+      let turn = (down(K.right) ? 1 : 0) - (down(K.left) ? 1 : 0);
+      let up = down(K.up);
+      if (joy.id !== null && me.index === 0) {   // the touch stick: sideways turns in proportion to the push, forward thrusts
         const t = joy.dx / 0.6;
         if (Math.abs(t) > 0.15) turn = clamp(t, -1, 1);
         if (joy.dy < -0.35) up = true;
       }
-      const boost = keys[' '] || ui.boost;
+      const boost = down(K.boost) || ui.boost;
       rocket.rotation += rocket.rotationSpeed * turn;
       const dx = Math.sin(rocket.rotation), dy = -Math.cos(rocket.rotation);
       rocket.thrusting = !!up;
@@ -1503,7 +1748,7 @@
     // ---------- Battery and the nav AI ----------
     function navActive() {
       if (game.level.noNav) return false;   // some systems have no working nav AI at all
-      return !game.level.battery || (game.nav && rocket.battery > 0);
+      return !game.level.battery || (me.nav && rocket.battery > 0);
     }
     function solarRate() {
       const d = Math.max(Math.hypot(rocket.x, rocket.y), sun.radius);
@@ -1511,34 +1756,34 @@
     }
     function powerRate() {   // net battery change per second, shown on the gauge
       let r = solarRate();
-      if (game.nav) r -= NAV_DRAIN;
+      if (me.nav) r -= NAV_DRAIN;
       if (rocket.charging) r += CHARGE_RATE;
       return r;
     }
     function toggleNav() {
       if (!game.level.battery || rocket.dead) return;
-      if (!game.nav && rocket.battery < NAV_MIN_CHARGE) {
+      if (!me.nav && rocket.battery < NAV_MIN_CHARGE) {
         popup(rocket.x, rocket.y - 8, 'NO POWER', '#ff5252', 12);
         OrbitalAudio.sfx.tick();
         return;
       }
-      game.nav = !game.nav;
-      popup(rocket.x, rocket.y - 8, game.nav ? 'NAV AI ON' : 'NAV AI OFF', game.nav ? '#4fc3f7' : '#cbd5e1', 12);
+      me.nav = !me.nav;
+      popup(rocket.x, rocket.y - 8, me.nav ? 'NAV AI ON' : 'NAV AI OFF', me.nav ? '#4fc3f7' : '#cbd5e1', 12);
       OrbitalAudio.sfx.select();
     }
     function updatePower() {
       if (!game.level.battery || rocket.dead) { rocket.charging = false; return; }
       const dt = 1 / 60;
-      rocket.charging = !!(keys['r'] || ui.charge) && rocket.fuel > 0 && rocket.battery < BATTERY_MAX;
+      rocket.charging = (down(me.keys.charge) || ui.charge) && rocket.fuel > 0 && rocket.battery < BATTERY_MAX;
       let b = rocket.battery + solarRate() * dt;
       if (rocket.charging) {
         const add = Math.min(CHARGE_RATE * dt, BATTERY_MAX - b, rocket.fuel / CHARGE_FUEL_COST);
         b += add; rocket.fuel = Math.max(0, rocket.fuel - add * CHARGE_FUEL_COST);
       }
-      if (game.nav) {
+      if (me.nav) {
         b -= NAV_DRAIN * dt;
         if (b <= 0) {
-          b = 0; game.nav = false;
+          b = 0; me.nav = false;
           popup(rocket.x, rocket.y - 8, 'NAV AI OFFLINE', '#ff5252', 12);
           OrbitalAudio.sfx.tick();
         }
@@ -1547,9 +1792,9 @@
     }
 
     function syncEngineAudio() {
-      const playing = game.state === GAME_STATE.PLAYING && !rocket.dead;
-      const th = playing && rocket.thrusting && !rocket.boosting;
-      const bo = playing && rocket.boosting;
+      const playing = game.state === GAME_STATE.PLAYING;
+      const bo = playing && players.some(p => !p.ship.dead && p.ship.boosting);
+      const th = playing && !bo && players.some(p => !p.ship.dead && p.ship.thrusting);
       if (th !== audioThrust) { audioThrust = th; OrbitalAudio.setThrust(th); }
       if (bo !== audioBoost) { audioBoost = bo; OrbitalAudio.setBoost(bo); }
     }
@@ -1560,11 +1805,12 @@
         H = canvas.height = window.innerHeight;
         makeStars();
       });
-      window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; ui.boost = ui.charge = false; pressedButton = null; hoverButton = null; });
+      window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; for (const P of players) P.ui.boost = P.ui.charge = false; pressedButton = null; hoverButton = null; });
 
       canvas.addEventListener('wheel', e => {
         e.preventDefault();
-        camera.zoomMul = clamp(camera.zoomMul * Math.exp(-e.deltaY * 0.001), 0.25, 3);
+        const c = playerAtX(e.clientX).camera;   // the view under the pointer
+        c.zoomMul = clamp(c.zoomMul * Math.exp(-e.deltaY * 0.001), 0.25, 3);
       }, { passive: false });
 
       // On-screen console buttons take presses before the camera drag does.
@@ -1590,33 +1836,43 @@
         }
         if (S === GAME_STATE.LEVEL_COMPLETE) { if (game.stateTimer > 45) nextLevel(); return true; }       // a tap or click moves on, like SPACE
         if (S === GAME_STATE.GAME_OVER || S === GAME_STATE.WIN) { if (game.stateTimer > 90) toWelcome(); return true; }
+        if (S === GAME_STATE.WELCOME) { const b = welcomeChipAt(x, y); if (b) b.press(); return !!b; }
         if (S !== GAME_STATE.PLAYING) return false;
-        const b = buttonAt(x, y) || hudLinkAt(x, y);
+        const b = viewButtonAt(x, y);
         if (!b) return false;
-        pressedButton = b; b.press();
+        pressedButton = b; pressedPlayer = me; b.press();
         return true;
       }
-      function releasePress() { if (pressedButton) { pressedButton.release(); pressedButton = null; } }
+      function viewButtonAt(x, y) {   // a console button or chip under a point, in whichever player's view it falls; leaves that player current
+        let b = null;
+        const P = playerAtX(x);
+        usePlayer(P);
+        withView(P, () => { layoutButtons(); b = buttonAt(x - VX, y) || hudLinkAt(x - VX, y); });
+        return b;
+      }
+      function releasePress() { if (pressedButton) { usePlayer(pressedPlayer); pressedButton.release(); pressedButton = null; } }
       canvas.addEventListener('mousedown', e => {
         unlockAudio();
-        if (pressAt(e.clientX, e.clientY) || game.state === GAME_STATE.MAP || game.state === GAME_STATE.CUSTOM) return;
-        isDragging = true; lastX = e.clientX; lastY = e.clientY;
+        if (pressAt(e.clientX, e.clientY) || game.state === GAME_STATE.MAP || game.state === GAME_STATE.CUSTOM || game.state === GAME_STATE.WELCOME) return;
+        isDragging = true; lastX = e.clientX; lastY = e.clientY; dragPlayer = playerAtX(e.clientX);
       });
       canvas.addEventListener('mousemove', e => {
         if (!isDragging) {
           const S = game.state, x = e.clientX, y = e.clientY;
-          hoverButton = S === GAME_STATE.PLAYING ? buttonAt(x, y)
+          hoverVX = 0;
+          hoverButton = S === GAME_STATE.PLAYING ? (hoverVX = players.length > 1 && x >= W / 2 ? Math.floor(W / 2) : 0, viewButtonAt(x, y))
                       : S === GAME_STATE.MAP ? mapButtonAt(x, y)
                       : S === GAME_STATE.CUSTOM ? customButtonAt(x, y)
-                      : S === GAME_STATE.LEVEL_INTRO && hit(introButton, x, y) ? introButton : null;
+                      : S === GAME_STATE.LEVEL_INTRO && hit(introButton, x, y) ? introButton
+                      : S === GAME_STATE.WELCOME ? welcomeChipAt(x, y) : null;
           map.hover = S === GAME_STATE.MAP ? mapStarAt(x, y) : -1;
-          canvas.style.cursor = hoverButton || map.hover >= 0 ? 'pointer' : S === GAME_STATE.MAP || S === GAME_STATE.CUSTOM ? 'default' : 'grab';
+          canvas.style.cursor = hoverButton || map.hover >= 0 ? 'pointer' : S === GAME_STATE.MAP || S === GAME_STATE.CUSTOM || S === GAME_STATE.WELCOME ? 'default' : 'grab';
           return;
         }
-        const mx = e.clientX - lastX, my = e.clientY - lastY;
-        if (Math.abs(mx) + Math.abs(my) > 2) camera.follow = false;   // dragging the view stops the camera following
-        camera.focusX -= mx / camera.scale; camera.focusY -= my / camera.scale;
-        camera.offsetX = -camera.focusX * camera.scale; camera.offsetY = -camera.focusY * camera.scale;
+        const mx = e.clientX - lastX, my = e.clientY - lastY, c = (dragPlayer || players[0]).camera;
+        if (Math.abs(mx) + Math.abs(my) > 2) c.follow = false;   // dragging the view stops the camera following
+        c.focusX -= mx / c.scale; c.focusY -= my / c.scale;
+        c.offsetX = -c.focusX * c.scale; c.offsetY = -c.focusY * c.scale;
         lastX = e.clientX; lastY = e.clientY;
       });
       canvas.addEventListener('mouseup', () => { isDragging = false; releasePress(); });
@@ -1628,8 +1884,8 @@
           const x = t.clientX, y = t.clientY;
           if (game.state === GAME_STATE.PLAYING) {
             if (joy.id === null && joyHit(x, y)) { joy.id = t.identifier; joyMove(x, y); continue; }
-            const b = buttonAt(x, y) || hudLinkAt(x, y);
-            if (b) { b.press(); touchButtons.set(t.identifier, b); }
+            const b = viewButtonAt(x, y);
+            if (b) { b.press(); touchButtons.set(t.identifier, { b, P: me }); }
           } else pressAt(x, y);
         }
         e.preventDefault();   // no scrolling, zooming or simulated mouse clicks from the canvas
@@ -1641,31 +1897,36 @@
       const touchEnd = e => {
         for (const t of e.changedTouches) {
           if (t.identifier === joy.id) joyRelease();
-          const b = touchButtons.get(t.identifier);
-          if (b) { b.release(); touchButtons.delete(t.identifier); }
+          const h = touchButtons.get(t.identifier);
+          if (h) { usePlayer(h.P); h.b.release(); touchButtons.delete(t.identifier); }
         }
       };
       canvas.addEventListener('touchend', touchEnd);
       canvas.addEventListener('touchcancel', touchEnd);
-      window.addEventListener('blur', () => { joyRelease(); for (const b of touchButtons.values()) b.release(); touchButtons.clear(); });
+      window.addEventListener('blur', () => { joyRelease(); for (const h of touchButtons.values()) { usePlayer(h.P); h.b.release(); } touchButtons.clear(); });
 
       document.addEventListener('keydown', e => {
         unlockAudio();
         const k = e.key;
-        keys[k] = true;
+        keys[k] = true; keys[e.code] = true;   // the code tells the two shift keys apart
         if (k.length === 1) keys[k.toLowerCase()] = true;
-        if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(k)) e.preventDefault();
+        if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', '/'].includes(k)) e.preventDefault();
         if (e.repeat) return;
         const S = game.state, confirm = k === ' ' || k === 'Enter';
         if (k === 'm' || k === 'M') { OrbitalAudio.toggleMute(); return; }
         if (S === GAME_STATE.WELCOME) {
           if (confirm) openMap(maxLevelReached);
+          else if (k === '1' || k === '2') setPlayers(+k);
+          else if (k === 'p' || k === 'P') setPlayers(3 - players.length);
         } else if (S === GAME_STATE.MAP) {
           if (map.travel) { if (confirm) map.travel.t = 1; }   // skip the flight
           else if (confirm) launchSelected();
           else if (['ArrowLeft', 'ArrowUp', 'a', 'A', 'w', 'W'].includes(k)) selectStar(map.selected - 1);
           else if (['ArrowRight', 'ArrowDown', 'd', 'D', 's', 'S'].includes(k)) selectStar(map.selected + 1);
+          else if (['PageUp', 'q', 'Q'].includes(k)) mapFlip(-1);
+          else if (['PageDown', 'e', 'E'].includes(k)) mapFlip(1);
           else if (k === 'c' || k === 'C') openCustom();
+          else if ((k === 'p' || k === 'P') && !game.inRun) setPlayers(3 - players.length);
           else if (k === 'Escape') leaveMap();
         } else if (S === GAME_STATE.CUSTOM) {
           if (confirm) launchCustom();
@@ -1680,8 +1941,8 @@
           else if (k === 'Escape') { if (game.levelIndex < 0) openCustom(); else openMap(game.levelIndex); }
         } else if (S === GAME_STATE.PLAYING) {
           if (k === 'x' || k === 'X') endGame('Run abandoned');
-          if (k === 'f' || k === 'F') camera.follow = !camera.follow;
-          if (k === 'n' || k === 'N') toggleNav();
+          if (k === 'f' || k === 'F') for (const P of players) P.camera.follow = !P.camera.follow;
+          for (const P of players) if (P.keys.nav.includes(k) || P.keys.nav.includes(k.toLowerCase())) { usePlayer(P); toggleNav(); }
         } else if (S === GAME_STATE.LEVEL_COMPLETE) {
           if (confirm && game.stateTimer > 45) nextLevel();
         } else if (S === GAME_STATE.GAME_OVER || S === GAME_STATE.WIN) {
@@ -1689,7 +1950,7 @@
         }
       });
       document.addEventListener('keyup', e => {
-        keys[e.key] = false;
+        keys[e.key] = false; keys[e.code] = false;
         if (e.key.length === 1) keys[e.key.toLowerCase()] = false;
       });
 
@@ -1787,7 +2048,7 @@
     }
 
     function drawTrail() {
-      drawTrailOf(trail, trailFrame, '255,255,255', 0.35);
+      for (const P of players) if (!P.ship.dead) drawTrailOf(P.trail, P === me ? trailFrame : P.trailFrame, P === me ? '255,255,255' : hexToRgb(P.color).join(','), 0.35);
       for (const r of rivals) if (!r.dead) drawTrailOf(r.trail, r.trailFrame, hexToRgb(r.color).join(','), 0.3);
     }
     function drawTrailOf(T, frame, rgb, alpha) {
@@ -1865,15 +2126,18 @@
       }
     }
 
-    function drawRocket() {
-      if (rocket.dead) return;
-      if (rocket.invuln > 0 && rocket.invuln % 16 < 8) ctx.globalAlpha = 0.4;
-      ctx.save();
-      ctx.translate(rocket.x, rocket.y);
-      ctx.rotate(rocket.rotation - Math.PI / 2);
-      drawRocketShape(rocket.thrusting, rocket.boosting, false);
-      ctx.restore();
-      ctx.globalAlpha = 1;
+    function drawRockets() {
+      for (const P of players) {
+        const s = P.ship;
+        if (s.dead) continue;
+        if (s.invuln > 0 && s.invuln % 16 < 8) ctx.globalAlpha = 0.4;
+        ctx.save();
+        ctx.translate(s.x, s.y);
+        ctx.rotate(s.rotation - Math.PI / 2);
+        drawRocketShape(s.thrusting, s.boosting, false, P.pal);
+        ctx.restore();
+        ctx.globalAlpha = 1;
+      }
     }
     function drawRivals() {
       for (const r of rivals) {
@@ -1903,7 +2167,8 @@
       if (rocket.dead || game.state !== GAME_STATE.PLAYING) return;   // not over the intro card or the results
       const target = findTarget();
       if (target) drawEdgeArrow(target.x, target.y, target.color, `${target.name.toUpperCase()} ${Math.round(Math.hypot(target.x - rocket.x, target.y - rocket.y))}`, 48);
-      rivals.forEach((r, i) => { if (!r.dead) drawEdgeArrow(r.x, r.y, r.color, `${r.name} ${Math.round(Math.hypot(r.x - rocket.x, r.y - rocket.y))}`, 64 + i * 18); });
+      const others = [...otherPlayers().filter(p => !p.ship.dead).map(p => ({ x: p.ship.x, y: p.ship.y, color: p.color, name: p.name })), ...rivals.filter(r => !r.dead)];
+      others.forEach((r, i) => drawEdgeArrow(r.x, r.y, r.color, `${r.name} ${Math.round(Math.hypot(r.x - rocket.x, r.y - rocket.y))}`, 64 + i * 18));
     }
     // An arrow at the screen edge pointing at an off-screen world point; nothing is drawn while the point is in view.
     function drawEdgeArrow(x, y, color, label, margin) {
@@ -1920,9 +2185,9 @@
       ctx.fillStyle = 'white'; ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(label, ax - Math.cos(ang) * 40, ay - Math.sin(ang) * 40);
     }
-    function drawRivalLabels() {   // each rival's name floats over its ship while it is in view
+    function drawRivalLabels() {   // each rival's name (and the other player's) floats over its ship while it is in view
       ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-      for (const r of rivals) {
+      for (const r of [...otherPlayers().map(p => ({ x: p.ship.x, y: p.ship.y, dead: p.ship.dead, color: p.color, name: p.name })), ...rivals]) {
         if (r.dead) continue;
         const s = worldToScreen(r.x, r.y);
         if (s.x < 0 || s.x > W || s.y < 0 || s.y > H) continue;
@@ -1933,13 +2198,13 @@
 
     // ---------- Console: on-screen buttons with their hotkeys ----------
     const buttons = [
-      { id: 'boost', label: 'BOOSTER', key: 'SPACE', color: '#4ade80',
+      { id: 'boost', label: 'BOOSTER', key: 'SPACE', keyFor: P => P.keys === KEYS_P1 ? 'L SHIFT' : P.keys === KEYS_P2 ? 'R SHIFT' : 'SPACE', color: '#4ade80',
         press() { ui.boost = true; }, release() { ui.boost = false; },
         active: () => rocket.boosting, enabled: () => rocket.fuel > 0 },
-      { id: 'nav', label: 'NAV AI', key: 'N', color: '#4fc3f7',
+      { id: 'nav', label: 'NAV AI', key: 'N', keyFor: P => P.keys.nav[0].toUpperCase(), color: '#4fc3f7',
         press() { toggleNav(); }, release() {},
-        active: () => game.nav && rocket.battery > 0, enabled: () => game.nav || rocket.battery >= NAV_MIN_CHARGE },
-      { id: 'charge', label: 'RECHARGE', key: 'R', color: '#facc15',
+        active: () => me.nav && rocket.battery > 0, enabled: () => me.nav || rocket.battery >= NAV_MIN_CHARGE },
+      { id: 'charge', label: 'RECHARGE', key: 'R', keyFor: P => P.keys.charge[0].toUpperCase(), color: '#facc15',
         press() { ui.charge = true; }, release() { ui.charge = false; },
         active: () => rocket.charging, enabled: () => rocket.fuel > 0 && rocket.battery < BATTERY_MAX },
     ];
@@ -1948,7 +2213,7 @@
 
     function layoutButtons() {   // centred along the bottom, or a column under the right thumb on touch screens; battery controls only appear on battery levels
       const show = game.level && game.level.battery ? buttons : buttons.slice(0, 1);
-      for (const b of buttons) b.visible = false;
+      for (const b of buttons) { b.visible = false; b.key = b.keyFor(me); }
       if (touchUI) {
         let y = H - 16 - 48;   // the booster lowest, where the thumb rests
         for (const b of show) { b.x = W - 16 - 150; b.y = y; b.w = 150; b.h = 48; b.visible = true; y -= 48 + 12; }
@@ -2022,8 +2287,28 @@
         press() { leaveMap(); }, release() {}, active: () => false, enabled: () => true },
       { id: 'custom', label: 'CUSTOM', key: 'C', color: '#facc15', x: 0, y: 0, w: 140, h: 40,
         press() { if (!map.travel) openCustom(); }, release() {}, active: () => false, enabled: () => !map.travel },
+      { id: 'players', label: '1 PLAYER', key: 'P', color: '#fb923c', x: 0, y: 0, w: 150, h: 40,
+        press() { if (!game.inRun) { setPlayers(3 - players.length); OrbitalAudio.sfx.select(); } }, release() {}, active: () => false, enabled: () => !game.inRun },
+      { id: 'prev', label: '', key: 'Q', color: '#cbd5e1', x: 0, y: 0, w: 44, h: 56, dir: -1,
+        press() { mapFlip(-1); }, release() {}, active: () => false, enabled: () => !map.travel && mapShownPage() > 0 },
+      { id: 'next', label: '', key: 'E', color: '#cbd5e1', x: 0, y: 0, w: 44, h: 56, dir: 1,
+        press() { mapFlip(1); }, release() {}, active: () => false, enabled: () => !map.travel && mapShownPage() < mapPages() - 1 },
     ];
     function mapButtonAt(x, y) { return mapButtons.find(b => hit(b, x, y)) || null; }
+    function drawPageArrow(b) {   // a chevron to the next or previous sector, with its key under it
+      if (!b.enabled()) return;
+      ctx.save();
+      ctx.strokeStyle = hoverButton === b ? '#ffffff' : 'rgba(255,255,255,0.6)'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+      const cx = b.x + b.w / 2, cy = b.y + 20;
+      ctx.beginPath(); ctx.moveTo(cx - b.dir * 7, cy - 12); ctx.lineTo(cx + b.dir * 7, cy); ctx.lineTo(cx - b.dir * 7, cy + 12); ctx.stroke();
+      if (!touchUI) {
+        ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        const kw = ctx.measureText(b.key).width + 14, kh = 20, kx = cx - kw / 2, ky = b.y + 36;
+        roundRectPath(kx, ky, kw, kh, 4); ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fill(); ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.stroke();
+        ctx.fillStyle = 'white'; ctx.fillText(b.key, cx, ky + kh / 2 + 1);
+      }
+      ctx.restore();
+    }
     function roundRectPath(x, y, w, h, r) {
       ctx.beginPath();
       ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
@@ -2034,7 +2319,7 @@
       ctx.save();
       ctx.globalAlpha *= enabled ? 1 : 0.4;
       roundRectPath(b.x, b.y, b.w, b.h, 8);
-      ctx.fillStyle = active ? rgba(b.color, 0.5) : rgba(b.color, hoverButton === b ? 0.28 : 0.12);
+      ctx.fillStyle = active ? rgba(b.color, 0.5) : rgba(b.color, hoverButton === b && hoverVX === VX ? 0.28 : 0.12);
       ctx.fill();
       ctx.lineWidth = active ? 2 : 1.5; ctx.strokeStyle = active ? '#ffffff' : b.color; ctx.stroke();
       ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
@@ -2103,87 +2388,132 @@
     function drawRaceBar(x, y, w, h) {   // your share grows from the left, the rivals' stack in from the right; past the post in the middle wins outright
       const total = Math.max(1, game.raceTotal);
       ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(x, y, w, h);
-      ctx.fillStyle = '#facc15'; ctx.fillRect(x, y, w * clamp(game.ore / total, 0, 1), h);
+      ctx.fillStyle = '#facc15'; ctx.fillRect(x, y, w * clamp(me.ore / total, 0, 1), h);
       let right = x + w;
-      for (const r of rivals) {
+      for (const r of [...otherPlayers(), ...rivals]) {
         const rw = w * clamp(r.ore / total, 0, 1);
-        const flash = game.ticks - r.lastOreTick < 40 && game.ticks % 10 < 5;
+        const flash = r.lastOreTick !== undefined && game.ticks - r.lastOreTick < 40 && game.ticks % 10 < 5;
         ctx.fillStyle = flash ? '#ffffff' : r.color; ctx.fillRect(right - rw, y, rw, h);
         right -= rw;
       }
       ctx.fillStyle = 'white'; ctx.fillRect(x + w / 2 - 1, y - 2, 2, h + 4);
     }
-    function drawRaceStatus(x, y) {   // your tally, then each rival's in its own colour
+    function drawRaceStatus(x, y) {   // your tally, then each rival's in its own colour; a crowded field takes two lines. Returns the height used
       ctx.textAlign = 'left'; ctx.font = '14px monospace';
-      const put = (txt, color) => { ctx.fillStyle = color; ctx.fillText(txt, x, y); x += ctx.measureText(txt).width; };
-      const full = `YOU  ${game.ore}` + rivals.map(r => `     ${r.name}  ${r.ore}`).join('') + `     ·   ${ores.length} LEFT`;
+      const x0 = x, put = (txt, color) => { ctx.fillStyle = color; ctx.fillText(txt, x, y); x += ctx.measureText(txt).width; };
+      const field = [...otherPlayers().map(p => ({ name: p.name, ore: p.ore, color: p.color, short: p.name })), ...rivals.map(r => ({ name: r.name, ore: r.ore, color: r.color, short: 'R' + (r.index + 1) }))];
+      const full = `${me.name}  ${me.ore}` + field.map(r => `     ${r.name}  ${r.ore}`).join('') + `     ·   ${ores.length} LEFT`;
       const compact = ctx.measureText(full).width > W / 2 - 70 - x;   // keep clear of the timer on narrow screens
-      put(`YOU  ${game.ore}`, 'white');
-      for (const r of rivals) put(`     ${compact && rivals.length > 1 ? 'R' + (r.index + 1) : r.name}  ${r.ore}`, r.color);
+      const two = compact && field.length > 3, perLine = Math.ceil(field.length / 2);
+      put(`${me.name}  ${me.ore}`, 'white');
+      field.forEach((r, i) => {
+        if (two && i === perLine) { x = x0; y += 18; }
+        put(`${i === perLine && two ? '' : '     '}${compact && rivals.length > 1 ? r.short : r.name}  ${r.ore}`, r.color);
+      });
       put(`     ·   ${ores.length} LEFT`, 'rgba(255,255,255,0.7)');
+      return two ? 40 : 22;
     }
 
-    function drawHUD() {
+    function drawVisitStatus(x, y) {   // many worlds to visit: a count, then the ones still to go in small print. Returns the height used
+      const left = planets.filter(p => p.collected === 0);
+      ctx.textAlign = 'left'; ctx.font = '14px monospace'; ctx.fillStyle = 'white';
+      ctx.fillText(`WORLDS  ${planets.length - left.length} / ${planets.length}`, x, y);
+      if (!left.length) return 22;
+      ctx.font = '11px monospace'; ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      let txt = 'TO GO  ' + left.map(p => p.name.toUpperCase()).join(' · ');
+      while (left.length > 1 && ctx.measureText(txt).width > W / 2 - 70 - x) { left.pop(); txt = 'TO GO  ' + left.map(p => p.name.toUpperCase()).join(' · ') + ' …'; }
+      ctx.fillText(txt, x, y + 18);
+      return 40;
+    }
+    function drawTopBar() {   // level, timer and score, once across the whole screen
       const L = game.level;
       ctx.save();
       ctx.textBaseline = 'top';
-      // Level and objective
       ctx.textAlign = 'left';
       ctx.fillStyle = '#4fc3f7'; ctx.font = 'bold 18px SpaceFont, Arial';
       ctx.fillText(`${game.levelIndex < 0 ? 'CUSTOM' : `LEVEL ${game.levelIndex + 1}`}  ·  ${L.name}`, 16, 14);
-      ctx.fillStyle = 'white'; ctx.font = '14px monospace';
-      if (L.goal.type === 'race') drawRaceStatus(16, 40); else ctx.fillText(goalText(), 16, 40);
-      if (L.goal.type === 'race') drawRaceBar(16, 62, 220, 6); else bar(16, 62, 220, 6, goalProgress(), '#facc15');
-      // Timer
       ctx.textAlign = 'center';
       const low = game.timeLeft <= 15 && game.state === GAME_STATE.PLAYING;
       ctx.fillStyle = low ? (game.ticks % 30 < 15 ? '#ff5252' : '#ffb4b4') : 'white';
       ctx.font = 'bold 30px monospace';
       ctx.fillText(formatTime(game.timeLeft), W / 2, 12);
-      // Score, lives, boost, heat
       ctx.textAlign = 'right';
       ctx.fillStyle = 'white'; ctx.font = 'bold 22px monospace';
       ctx.fillText(`${game.score}`, W - 16, 12);
       ctx.font = '12px monospace'; ctx.fillStyle = 'rgba(255,255,255,0.6)';
-      ctx.fillText(`BEST ${highScore}`, W - 16, 38);
-      for (let i = 0; i < game.lives; i++) {
-        ctx.save(); ctx.translate(W - 22 - i * 18, 66); ctx.rotate(-Math.PI / 2); ctx.scale(2, 2);
+      ctx.fillText(players.length > 1 ? '2 PLAYERS' : `BEST ${highScore}`, W - 16, 38);
+      ctx.restore();
+    }
+    function drawHUD() {   // one player's view: objective, lives, heat, combo, hint, chips and console
+      const L = game.level, split = players.length > 1, top = split ? 26 : 0;   // in two-player mode the halves start under the top bar
+      ctx.save();
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+      if (split) {   // whose half this is
+        ctx.fillStyle = me.color; ctx.font = 'bold 14px SpaceFont, Arial';
+        ctx.fillText(`${me.name}${me.out ? '  ·  OUT OF SHIPS' : ''}`, 16, 44);
+      }
+      ctx.fillStyle = 'white'; ctx.font = '14px monospace';
+      let oy = top;   // extra height when the status takes two lines
+      if (L.goal.type === 'race') oy += drawRaceStatus(16, 40 + top) - 22;
+      else if (L.goal.type === 'visit' && planets.length > 5) oy += drawVisitStatus(16, 40 + top) - 22;
+      else ctx.fillText(goalText(), 16, 40 + top);
+      if (L.goal.type === 'race') drawRaceBar(16, 62 + oy, 220, 6); else bar(16, 62 + oy, 220, 6, goalProgress(), '#facc15');
+      const pending = rivals.filter(r => !r.launched);
+      if (pending.length && game.state === GAME_STATE.PLAYING) {   // the head start
+        const t = Math.max(...pending.map(r => r.respawnTimer)) / 60, soon = t < 10 && game.ticks % 30 < 15;
+        ctx.textAlign = 'left'; ctx.font = 'bold 12px monospace'; ctx.fillStyle = soon ? '#ff5252' : 'rgba(255,255,255,0.75)';
+        ctx.fillText(`${pending.length === rivals.length ? 'RIVALS' : pending.length > 1 ? `${pending.length} RIVALS` : pending[0].name} LAUNCH${pending.length === 1 ? 'ES' : ''} IN ${formatTime(t)}`, 16, 74 + oy);
+        oy += 16;
+      }
+      // Lives and heat
+      ctx.textAlign = 'right';
+      for (let i = 0; i < me.lives; i++) {
+        ctx.save(); ctx.translate(W - 22 - i * 18, 66 + (split ? 12 : 0)); ctx.rotate(-Math.PI / 2); ctx.scale(2, 2);
         drawRocketShape(false, false, true);
         ctx.restore();
       }
       if (rocket.heat > 0) {
-        ctx.fillStyle = '#f87171'; ctx.font = '12px monospace'; ctx.fillText('HULL HEAT', W - 16, 82);
-        bar(W - 16 - 140, 98, 140, 8, rocket.heat, rocket.heat > 0.7 && game.ticks % 20 < 10 ? '#ffffff' : '#f87171');
+        ctx.fillStyle = '#f87171'; ctx.font = '12px monospace'; ctx.fillText('HULL HEAT', W - 16, 82 + (split ? 12 : 0));
+        bar(W - 16 - 140, 98 + (split ? 12 : 0), 140, 8, rocket.heat, rocket.heat > 0.7 && game.ticks % 20 < 10 ? '#ffffff' : '#f87171');
       }
       // Combo
-      if (game.combo > 1 && game.comboTimer > 0) {
+      if (me.combo > 1 && me.comboTimer > 0) {
         ctx.textAlign = 'center';
-        ctx.globalAlpha = clamp(game.comboTimer / 60, 0, 1);
+        ctx.globalAlpha = clamp(me.comboTimer / 60, 0, 1);
         ctx.fillStyle = '#facc15'; ctx.font = 'bold 26px SpaceFont, Arial';
-        ctx.fillText(`x${game.combo} COMBO`, W / 2, 56);
+        ctx.fillText(`x${me.combo} COMBO`, W / 2, 56 + top);
         ctx.globalAlpha = 1;
       }
       // Hint (centred above the console) and controls
       ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-      if (game.state === GAME_STATE.PLAYING && game.ticks < 900 && L.hint) {
+      if (game.state === GAME_STATE.PLAYING && game.ticks < 900 && L.hint && !split) {
         ctx.globalAlpha = clamp((900 - game.ticks) / 120, 0, 1);
         ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.font = '14px monospace';
         ctx.fillText(L.hint, W / 2, touchUI ? 118 : H - 112);   // above the console, or under the objective when the console is a column
         ctx.globalAlpha = 1;
       }
-      if (touchUI) drawHudLinks(16, 76);
-      else {
+      if (touchUI && me.index === 0) drawHudLinks(16, 76 + oy);
+      else if (!split) {
         ctx.textAlign = 'left'; ctx.textBaseline = 'top';
         ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace';
-        ctx.fillText(`M  music ${OrbitalAudio.isMuted() ? 'off' : 'on'}  ·  F  follow ${camera.follow ? 'on' : 'off'}  ·  X  abandon`, 16, 78);
+        ctx.fillText(`M  music ${OrbitalAudio.isMuted() ? 'off' : 'on'}  ·  F  follow ${camera.follow ? 'on' : 'off'}  ·  X  abandon`, 16, 78 + oy);
       }
       drawConsole();
-      if (touchUI && game.state === GAME_STATE.PLAYING) drawJoystick();
+      if (touchUI && game.state === GAME_STATE.PLAYING && me.index === 0) drawJoystick();
+      if (me.out) {   // no ships left: the other pilot carries on
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillStyle = 'rgba(255,82,82,0.9)'; ctx.font = 'bold 28px SpaceFont, Arial';
+        ctx.fillText('OUT OF SHIPS', W / 2, H / 2 - 20);
+        ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '14px monospace';
+        ctx.fillText('back next level', W / 2, H / 2 + 10);
+      }
       ctx.restore();
     }
 
     function drawMinimap() {
-      const size = touchUI ? 110 : 150, pad = 16, cx = W - pad - size / 2, cy = touchUI ? 112 + size / 2 : H - pad - size / 2;   // under the lives on touch screens, out of the thumb's way
+      const split = players.length > 1, size = touchUI || split ? 110 : 150, pad = 16, cx = W - pad - size / 2;
+      const cy = touchUI ? 112 + size / 2 : split ? H - 100 - size / 2 : H - pad - size / 2;   // under the lives on touch screens, out of the thumb's way; above the console in a half-width view
       let range = 0;
       for (const p of planets) range = Math.max(range, p.distance);
       for (const A of levelBelts(game.level)) range = Math.max(range, A.outer);
@@ -2210,8 +2540,9 @@
         if (r.dead) continue;
         ctx.fillStyle = r.color; ctx.beginPath(); ctx.arc(cx + r.x * k, cy + r.y * k, 2.2, 0, Math.PI * 2); ctx.fill();
       }
-      if (!rocket.dead) {
-        ctx.fillStyle = 'white'; ctx.beginPath(); ctx.arc(cx + rocket.x * k, cy + rocket.y * k, 2, 0, Math.PI * 2); ctx.fill();
+      for (const P of players) {
+        if (P.ship.dead) continue;
+        ctx.fillStyle = P === me ? 'white' : P.color; ctx.beginPath(); ctx.arc(cx + P.ship.x * k, cy + P.ship.y * k, 2, 0, Math.PI * 2); ctx.fill();
       }
       ctx.restore();
     }
@@ -2225,7 +2556,7 @@
 
     function drawLevelIntro() {
       const L = game.level, a = clamp(game.stateTimer / 20, 0, 1);
-      const k = clamp(H / 640, 0.6, 1), f = Math.max(0.72, k), px = size => `${Math.round(size * f)}px`;   // short screens pack the card tighter
+      const k = clamp(H / 640, 0.6, 1) * (players.length > 1 ? 0.85 : 1), f = Math.max(0.72, k), px = size => `${Math.round(size * f)}px`;   // short screens, and the two-player card, pack tighter
       overlay(0.55 * a);
       ctx.globalAlpha = a; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = `${px(20)} SpaceFont, Arial`;
@@ -2237,12 +2568,14 @@
       ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = `${px(15)} monospace`;
       ctx.fillText(L.hint, W / 2, H / 2 + 45 * k);
       ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = `${px(14)} monospace`;
-      ctx.fillText(`TIME LIMIT ${formatTime(L.time)}   ·   LIVES ${game.lives}`, W / 2, H / 2 + 80 * k);
+      ctx.fillText(`TIME LIMIT ${formatTime(L.time)}   ·   LIVES ${players.length > 1 ? players.map(p => `${p.name} ${p.lives}`).join('  ') : players[0].lives}`, W / 2, H / 2 + 80 * k);
       let y = H / 2 + 140 * k;
-      if (L.notes) {   // new mechanics introduced on this level
+      const notes = (L.notes || []).slice();
+      if (players.length > 1) notes.push(...players.map(p => `${p.name}:  ${KEY_HELP[p.name]}`));   // who presses what
+      if (notes.length) {   // new mechanics introduced on this level
         ctx.fillStyle = '#facc15'; ctx.font = `${px(14)} monospace`;
-        L.notes.forEach((line, i) => ctx.fillText(line, W / 2, H / 2 + 112 * k + i * 20 * f));
-        y += L.notes.length * 20 * f + 4;
+        notes.forEach((line, i) => { ctx.fillStyle = line.startsWith('P1') ? '#4fc3f7' : line.startsWith('P2') ? '#fb923c' : '#facc15'; ctx.fillText(line, W / 2, H / 2 + 112 * k + i * 20 * f); });
+        y += notes.length * 20 * f + 4;
       }
       introButton.x = W / 2 - introButton.w / 2; introButton.y = y - introButton.h / 2;
       drawButton(introButton);
@@ -2260,24 +2593,26 @@
       overlay(0.6 * a);
       ctx.globalAlpha = a; ctx.textBaseline = 'middle';
       ctx.textAlign = 'center';
-      ctx.fillStyle = '#4ade80'; ctx.font = `bold ${short ? 44 : 60}px SpaceFont, Arial`;
-      ctx.fillText(s.rivalOres.length > 1 ? 'RIVALS BEATEN' : s.rivalOres.length ? 'RIVAL BEATEN' : 'LEVEL COMPLETE', W / 2, H / 2 - (short ? 92 : 110));
+      const race = game.level.goal.type === 'race', duel = race && players.length > 1;
+      ctx.fillStyle = duel ? (s.winner === 'P2' ? '#fb923c' : s.winner ? '#4fc3f7' : '#facc15') : '#4ade80'; ctx.font = `bold ${short ? 44 : 60}px SpaceFont, Arial`;
+      ctx.fillText(duel ? (s.winner ? `${s.winner} WINS` : 'DEAD HEAT') : s.rivalOres.length > 1 ? 'RIVALS BEATEN' : s.rivalOres.length ? 'RIVAL BEATEN' : 'LEVEL COMPLETE', W / 2, H / 2 - (short ? 92 : 110));
       ctx.font = `${short ? 15 : 18}px monospace`;
       const rows = [
-        ['ORE COLLECTED', `${s.ore}`],
-        ...s.rivalOres.map(r => [`${r.name} ORE`, `${r.ore}`]),
+        ...(players.length > 1 ? s.ores.map(p => [`${p.name} ORE`, `${p.ore}`]) : [['ORE COLLECTED', `${s.ore}`]]),
+        ...(short && s.rivalOres.length > 3 ? [['RIVALS\' ORE', s.rivalOres.map(r => r.ore).join(' · ')]] : s.rivalOres.map(r => [`${r.name} ORE`, `${r.ore}`])),
         [`TIME BONUS  (${formatTime(s.timeLeft)} left)`, `+${s.timeBonus}`],
         ['LEVEL BONUS', `+${s.levelBonus}`],
         ['EXTRA LIFE', '+1'],
         ['SCORE', `${game.score}`],
       ];
+      const rowH = short || rows.length > 7 ? 22 : 28, y0 = H / 2 - (short ? 52 : 40);
       rows.forEach(([k, v], i) => {
-        const y = H / 2 - (short ? 52 : 40) + i * (short ? 22 : 28);
+        const y = y0 + i * rowH;
         ctx.textAlign = 'right'; ctx.fillStyle = 'white'; ctx.fillText(k, W / 2 - 10, y);
         ctx.textAlign = 'left'; ctx.fillStyle = i === rows.length - 1 ? '#facc15' : 'white'; ctx.fillText(v, W / 2 + 10, y);
       });
       ctx.textAlign = 'center';
-      if (game.stateTimer > 45) pulseText(game.levelIndex >= 0 && game.levelIndex + 1 < LEVELS.length ? (touchUI ? 'TAP TO FLY ON' : 'PRESS SPACE TO FLY ON') : (touchUI ? 'TAP TO CONTINUE' : 'PRESS SPACE'), W / 2, short ? H - 26 : H / 2 + 130);
+      if (game.stateTimer > 45) pulseText(game.levelIndex >= 0 && game.levelIndex + 1 < LEVELS.length ? (touchUI ? 'TAP TO FLY ON' : 'PRESS SPACE TO FLY ON') : (touchUI ? 'TAP TO CONTINUE' : 'PRESS SPACE'), W / 2, short ? H - 26 : Math.min(H - 26, Math.max(H / 2 + 130, y0 + rows.length * rowH + 16)));
       ctx.globalAlpha = 1;
     }
 
@@ -2354,10 +2689,36 @@
         ctx.fillText(`LAST RUN  ${game.score}`, cx, cy + 30);
       }
       ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.font = W < 760 ? '12px monospace' : '14px monospace';
-      ctx.fillText(touchUI ? 'JOYSTICK  push forward to thrust, sideways to turn     BOOSTER  hold the button'
-                           : 'ARROWS / WASD  steer & thrust     SPACE  booster     F  camera follow     M  music     X  abandon run', cx, H - 48);
+      if (players.length > 1 && H < 520) {
+        ctx.fillText('P1  WASD + LEFT SHIFT     P2  ARROWS + RIGHT SHIFT', cx, H - 48);
+      } else if (players.length > 1) {
+        ctx.fillStyle = '#4fc3f7'; ctx.fillText(`P1  ${KEY_HELP.P1}`, cx, H - 70);
+        ctx.fillStyle = '#fb923c'; ctx.fillText(`P2  ${KEY_HELP.P2}`, cx, H - 48);
+        ctx.fillStyle = 'rgba(255,255,255,0.75)';
+      } else {
+        ctx.fillText(touchUI ? 'JOYSTICK  push forward to thrust, sideways to turn     BOOSTER  hold the button'
+                             : 'ARROWS / WASD  steer & thrust     SPACE  booster     F  camera follow     M  music     X  abandon run', cx, H - 48);
+      }
       ctx.fillText(`${LEVELS.length} STAR SYSTEMS   ·   SOUND ${OrbitalAudio.isMuted() ? 'OFF' : 'ON'}`, cx, H - 26);
+      drawWelcomeChips(cx, H * 0.66 + (H < 520 ? 36 : 56));
       startButton.style.display = 'block';
+    }
+    // How many pilots: chips under the start button on the welcome screen (1 / 2 or P on the keyboard)
+    const welcomeChips = [1, 2].map(n => ({ n, x: 0, y: 0, w: 120, h: 30, press() { setPlayers(n); OrbitalAudio.sfx.select(); } }));
+    function welcomeChipAt(x, y) { return welcomeChips.find(c => hit(c, x, y)) || null; }
+    function drawWelcomeChips(cx, y) {
+      ctx.save();
+      ctx.font = 'bold 13px SpaceFont, Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineWidth = 1.5;
+      welcomeChips.forEach((c, i) => {
+        c.x = cx - 124 + i * 128; c.y = y;
+        const on = players.length === c.n;
+        roundRectPath(c.x, c.y, c.w, c.h, 15);
+        ctx.fillStyle = on ? 'rgba(79,195,247,0.35)' : hoverButton === c ? 'rgba(255,255,255,0.14)' : 'rgba(255,255,255,0.06)'; ctx.fill();
+        ctx.strokeStyle = on ? '#4fc3f7' : 'rgba(255,255,255,0.35)'; ctx.stroke();
+        ctx.fillStyle = on ? 'white' : 'rgba(255,255,255,0.7)';
+        ctx.fillText(c.n === 1 ? '1 PLAYER' : '2 PLAYERS', c.x + c.w / 2, c.y + c.h / 2 + 1);
+      });
+      ctx.restore();
     }
 
     function drawMap() {
@@ -2368,25 +2729,25 @@
       ctx.fillStyle = '#4fc3f7'; ctx.font = 'bold 34px SpaceFont, Arial';
       const short = H < 520;
       ctx.fillText('STAR MAP', W / 2, short ? 30 : 44);
+      const page = mapShownPage(), first = page * MAP_PER_PAGE, last = Math.min(first + MAP_PER_PAGE, LEVELS.length) - 1;
       ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '14px monospace';
-      ctx.fillText(`${Math.min(cleared, LEVELS.length)} OF ${LEVELS.length} SYSTEMS CLEARED`, W / 2, short ? 54 : 72);
+      ctx.fillText(`${Math.min(cleared, LEVELS.length)} OF ${LEVELS.length} ${short ? 'CLEARED' : 'SYSTEMS CLEARED'}   ·   SECTOR ${page + 1} OF ${mapPages()}`, W / 2, short ? 54 : 72);
       if (game.inRun) {
         ctx.textAlign = 'right'; ctx.fillStyle = 'white'; ctx.font = 'bold 22px monospace';
         ctx.fillText(`${game.score}`, W - 16, 24);
         ctx.font = '12px monospace'; ctx.fillStyle = 'rgba(255,255,255,0.6)';
-        ctx.fillText(`LIVES ${game.lives}   ·   FUEL ${Math.floor(rocket.fuel)}`, W - 16, 48);
+        ctx.fillText(players.length > 1 ? `LIVES ${players.map(p => p.lives).join(' + ')}` : `LIVES ${players[0].lives}   ·   FUEL ${Math.floor(players[0].ship.fuel)}`, W - 16, 48);
       }
       // the route
       ctx.setLineDash([4, 6]); ctx.lineWidth = 1.5;
-      for (let i = 0; i + 1 < LEVELS.length; i++) {
-        const a = mapStarPos(i), b = mapStarPos(i + 1);
-        ctx.strokeStyle = i < maxLevelReached ? 'rgba(79,195,247,0.55)' : 'rgba(255,255,255,0.12)';
-        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-      }
+      const lane = (a, b, open) => { ctx.strokeStyle = open ? 'rgba(79,195,247,0.55)' : 'rgba(255,255,255,0.12)'; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); };
+      for (let i = first; i < last; i++) lane(mapStarPos(i), mapStarPos(i + 1), i < maxLevelReached);
+      if (page > 0) { const a = mapStarPos(first); lane({ x: -20, y: a.y }, a, first <= maxLevelReached); }                       // the lane in from the last sector
+      if (last + 1 < LEVELS.length) { const b = mapStarPos(last); lane(b, { x: W + 20, y: b.y }, last < maxLevelReached); }   // and out to the next
       ctx.setLineDash([]);
       // the systems
       ctx.textAlign = 'center';
-      for (let i = 0; i < LEVELS.length; i++) {
+      for (let i = first; i <= last; i++) {
         const L = LEVELS[i], st = mapStarStyle(i), p = mapStarPos(i);
         const unlocked = i <= maxLevelReached, done = i < cleared;
         const r = 5 + st.radius / 8, color = unlocked ? st.color : '#475569';
@@ -2415,40 +2776,45 @@
         ctx.globalAlpha = 1;
       }
       // the rocket, parked at a system or flying between two
-      let rx, ry, ang, thrusting = false;
+      let rx, ry, ang, thrusting = false, showRocket = true;
       if (map.travel) {
         const k = smoothstep(map.travel.t), p = travelPos(map.travel, k), q = travelPos(map.travel, Math.min(1, k + 0.01));
         rx = p.x; ry = p.y; ang = Math.atan2(q.y - p.y, q.x - p.x); thrusting = true;
       } else {
         const p = mapStarPos(map.rocketAt), nxt = mapStarPos(Math.min(map.rocketAt + 1, LEVELS.length - 1));
-        rx = p.x; ry = p.y - 26 + 2 * Math.sin(t * 0.05); ang = Math.atan2(nxt.y - p.y, nxt.x - p.x);
+        rx = p.x; ry = p.y - 26 + 2 * Math.sin(t * 0.05); ang = mapPage(map.rocketAt + 1) === page ? Math.atan2(nxt.y - p.y, nxt.x - p.x) : 0;
+        showRocket = mapPage(map.rocketAt) === page;   // parked in another sector: not on this page
       }
       drawParticles();
-      ctx.save(); ctx.translate(rx, ry); ctx.rotate(ang); ctx.scale(2.5, 2.5); drawRocketShape(thrusting, false, false); ctx.restore();
-      // the chosen system
-      const sel = LEVELS[map.selected], sst = mapStarStyle(map.selected);
+      if (showRocket) { ctx.save(); ctx.translate(rx, ry); ctx.rotate(ang); ctx.scale(2.5, 2.5); drawRocketShape(thrusting, false, false); ctx.restore(); }
+      // the chosen system, or a sector still locked
+      const sel = LEVELS[map.selected], sst = mapStarStyle(map.selected), locked = !map.travel && mapPage(map.selected) !== page;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillStyle = sst.color; ctx.font = 'bold 26px SpaceFont, Arial';
-      ctx.fillText(map.travel ? `EN ROUTE TO ${LEVELS[map.travel.to].name}` : sel.name, W / 2, H - (short ? 150 : 172));
+      ctx.fillStyle = locked ? 'rgba(255,255,255,0.5)' : sst.color; ctx.font = 'bold 26px SpaceFont, Arial';
+      ctx.fillText(map.travel ? `EN ROUTE TO ${LEVELS[map.travel.to].name}` : locked ? `SECTOR ${page + 1}` : sel.name, W / 2, H - (short ? 150 : 172));
       ctx.fillStyle = 'white'; ctx.font = '15px monospace';
-      ctx.fillText(sel.brief, W / 2, H - (short ? 126 : 144));
+      ctx.fillText(locked ? 'These systems unlock as you clear the sector before them.' : sel.brief, W / 2, H - (short ? 126 : 144));
       const status = map.selected < cleared ? 'CLEARED' : map.selected === maxLevelReached ? 'NEXT' : 'UNLOCKED';
-      const tags = [status, `${sel.planets.length} PLANET${sel.planets.length > 1 ? 'S' : ''}`, `TIME ${formatTime(sel.time)}`];
-      if (levelBelts(sel).length) tags.push('ASTEROIDS');
-      if (sel.battery) tags.push('BATTERY');
-      if (sel.noNav) tags.push('NO NAV AI');
-      const nr = levelRivals(sel).length;
-      if (nr) tags.push(nr > 1 ? `${nr} RIVALS` : 'RIVAL');
+      const tags = locked ? [`SYSTEMS ${first + 1} TO ${last + 1}`, 'LOCKED'] : [status, `${sel.planets.length} PLANET${sel.planets.length > 1 ? 'S' : ''}`, `TIME ${formatTime(sel.time)}`];
+      if (!locked) {
+        if (levelBelts(sel).length) tags.push('ASTEROIDS');
+        if (sel.battery) tags.push('BATTERY');
+        if (sel.noNav) tags.push('NO NAV AI');
+        const nr = levelRivals(sel).length;
+        if (nr) tags.push(nr > 1 ? `${nr} RIVALS` : 'RIVAL');
+      }
       ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.font = '13px monospace';
       ctx.fillText(tags.join('   ·   '), W / 2, H - (short ? 104 : 120));
       // buttons
-      const go = mapButtons[0], back = mapButtons[1], cust = mapButtons[2];
+      const go = mapButtons[0], back = mapButtons[1], cust = mapButtons[2], who = mapButtons[3], prev = mapButtons[4], next = mapButtons[5];
       go.x = W / 2 - go.w / 2; go.y = H - 84;
       back.x = 16; back.y = H - 56; back.label = game.inRun ? 'QUIT RUN' : 'BACK';
       cust.x = W - 16 - cust.w; cust.y = H - 56;
-      drawButton(go); drawButton(back); drawButton(cust);
+      who.x = go.x - 12 - who.w; who.y = H - 80; who.label = players.length > 1 ? '2 PLAYERS' : '1 PLAYER';
+      prev.x = 16; prev.y = H * (short ? 0.36 : 0.47) - 20; next.x = W - 16 - next.w; next.y = prev.y;
+      drawButton(go); drawButton(back); drawButton(cust); drawButton(who); drawPageArrow(prev); drawPageArrow(next);
       ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(touchUI ? 'TAP a star to select it, tap again to go     CUSTOM  build your own' : 'ARROWS  choose a system     ENTER  launch     C  build your own     click a star to select it, click again to go', W / 2, H - 18);
+      ctx.fillText(touchUI ? 'TAP a star to select it, tap again to go     < >  change sector     CUSTOM  build your own' : 'ARROWS  choose a system     Q / E  change sector     ENTER  launch     C  build your own     click a star twice to go', W / 2, H - 18);
       ctx.restore();
     }
 
@@ -2463,19 +2829,21 @@
       ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '14px monospace';
       ctx.fillText('BUILD A STAR SYSTEM AND FLY IT', W / 2, short ? 54 : 72);
       // the choices
-      const lx = Math.round(W * 0.08), vx = Math.round(W * 0.34), y0 = Math.round(H * (short ? 0.27 : 0.3)), dy = short ? 48 : 64, rh = short ? 42 : 48;
+      const lx = Math.round(W * 0.08), vx = Math.round(W * 0.34), y0 = Math.round(H * (short ? 0.19 : 0.24)), nrows = CUSTOM_ROWS.length;
+      const dy = short ? Math.floor((H - 94 - y0) / (nrows - 1)) : clamp(Math.floor((H - 150 - y0) / (nrows - 1)), 36, 54), rh = Math.min(short ? 30 : 42, dy - 4);
       CUSTOM_ROWS.forEach((row, i) => {
-        const y = y0 + i * dy, sel = i === custom.row, dim = row.key === 'skill' && custom.rivals === 0, v = custom[row.key];
-        const R = custom.rows[i]; R.x = lx - 16; R.y = y - rh / 2; R.w = vx + 150 - R.x; R.h = rh;
+        const y = y0 + i * dy, sel = i === custom.row, dim = (row.key === 'skill' || row.key === 'delay') && custom.rivals === 0, v = custom[row.key];
+        const R = custom.rows[i]; R.x = lx - 16; R.y = y - rh / 2; R.w = vx + 168 - R.x; R.h = rh;
         if (sel) { ctx.fillStyle = 'rgba(79,195,247,0.1)'; roundRectPath(R.x, R.y, R.w, R.h, 8); ctx.fill(); }
         ctx.globalAlpha = dim ? 0.35 : 1;
-        ctx.textAlign = 'left'; ctx.fillStyle = sel ? '#4fc3f7' : 'rgba(255,255,255,0.8)'; ctx.font = `${sel ? 'bold ' : ''}16px SpaceFont, Arial`;
+        ctx.textAlign = 'left'; ctx.fillStyle = sel ? '#4fc3f7' : 'rgba(255,255,255,0.8)'; ctx.font = `${sel ? 'bold ' : ''}${short ? 14 : 16}px SpaceFont, Arial`;
         ctx.fillText(row.label, lx, y);
-        ctx.textAlign = 'center'; ctx.fillStyle = 'white'; ctx.font = 'bold 20px monospace';
-        ctx.fillText(row.text(v), vx + 66, y);
+        const text = row.text(v), big = short ? 17 : 20;
+        ctx.textAlign = 'center'; ctx.fillStyle = row.color ? row.color(v) : 'white'; ctx.font = `bold ${text.length > 8 ? big - 4 : big}px monospace`;
+        ctx.fillText(text, vx + 75, y);
         for (const h of custom.hit) {   // the arrows either side of the value
           if (h.row !== i) continue;
-          h.x = h.delta < 0 ? vx - 14 : vx + 118; h.y = y - 14; h.w = 28; h.h = 28;
+          h.x = h.delta < 0 ? vx - 14 : vx + 136; h.y = y - 14; h.w = 28; h.h = 28;
           const can = h.delta < 0 ? v > row.min : v < row.max;
           ctx.fillStyle = !can ? 'rgba(255,255,255,0.15)' : hoverButton === h ? '#ffffff' : sel ? '#4fc3f7' : 'rgba(255,255,255,0.6)';
           ctx.beginPath();
@@ -2485,16 +2853,21 @@
         }
         ctx.globalAlpha = 1;
       });
-      // what the rival handicap means, under the choices
-      const sk = CUSTOM_SKILLS[custom.skill], ly = y0 + CUSTOM_ROWS.length * dy - 10;
-      ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.font = '12px monospace';
-      const pct = v => `${Math.round(v * 100)}%`, secs = t => `${(t / 60).toFixed(0)} s`;
-      const lines = custom.rivals === 0 ? ['No rivals: collect the ore quota before time runs out']
-                  : short ? [`${sk.label}: ${pct(sk.thrust)} thrust, ${pct(sk.turn)} turn rate`, `pauses ${secs(sk.pause)}/capture, ${secs(sk.linger)}/pickup`]
-                  : [`${sk.label}: ${pct(sk.thrust)} thrust, ${pct(sk.turn)} turn rate,`, `pauses ${secs(sk.pause)} after each capture and ${secs(sk.linger)} after each pickup`];
-      lines.forEach((t, i) => ctx.fillText(t, lx, ly + i * 18));
+      // what the chosen setting means, under the choices (not on short screens, where the buttons need the room)
+      if (!short) {
+        const sk = CUSTOM_SKILLS[custom.skill], ly = y0 + (CUSTOM_ROWS.length - 1) * dy + 30, key = CUSTOM_ROWS[custom.row].key;
+        ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.font = '12px monospace';
+        const pct = v => `${Math.round(v * 100)}%`, secs = t => `${(t / 60).toFixed(0)} s`;
+        const lines = key === 'star' ? [`${CUSTOM_STAR_TYPES[custom.star].label}: ${CUSTOM_STAR_TYPES[custom.star].blurb}`]
+                    : key === 'nav' ? [`NAV AI ${CUSTOM_NAV[custom.nav].label}: ${CUSTOM_NAV[custom.nav].blurb}`]
+                    : key === 'size' ? [`${CUSTOM_SIZES[custom.size].label}: orbits about ${CUSTOM_SIZES[custom.size].gap} units apart`]
+                    : key === 'delay' ? [custom.delay ? `HEAD START: the rivals launch ${CUSTOM_DELAYS[custom.delay]} seconds after you` : 'HEAD START: the rivals launch when you do']
+                    : custom.rivals === 0 ? ['No rivals: collect the ore quota before time runs out']
+                    : [`${sk.label}: ${pct(sk.thrust)} thrust, ${pct(sk.turn)} turn rate,`, `pauses ${secs(sk.pause)} after each capture and ${secs(sk.linger)} after each pickup`];
+        lines.forEach((t, i) => ctx.fillText(t, lx, ly + i * 18));
+      }
       // the generated system
-      const cx = Math.round(W * 0.73), cy = Math.round(H * (short ? 0.42 : 0.47)), R = Math.round(Math.min(W * 0.17, H * (short ? 0.22 : 0.25)));
+      const cx = Math.round(W * 0.73), cy = Math.round(H * (short ? 0.38 : 0.47)), R = Math.round(Math.min(W * 0.17, H * (short ? 0.2 : 0.25)));
       drawCustomPreview(cx, cy, R);
       const nr = levelRivals(L).length;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -2502,7 +2875,7 @@
       ctx.fillText(L.name, cx, cy + R + (short ? 28 : 36));
       ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '13px monospace';
       ctx.fillText(`${L.planets.length} WORLDS   ·   ${L.oreTotal} ORE   ·   TIME ${formatTime(L.time)}`, cx, cy + R + (short ? 46 : 60));
-      ctx.fillText(nr ? `WIN: MORE ORE THAN ${nr > 1 ? 'EVERY RIVAL' : 'THE RIVAL'}` : `WIN: COLLECT ${L.goal.count} ORE`, cx, cy + R + (short ? 62 : 80));
+      ctx.fillText(nr ? `WIN: MORE ORE THAN ${nr > 1 ? 'EVERY RIVAL' : 'THE RIVAL'}${custom.delay ? `   ·   ${CUSTOM_DELAYS[custom.delay]} S HEAD START` : ''}` : `WIN: COLLECT ${L.goal.count} ORE`, cx, cy + R + (short ? 62 : 80));
       // buttons
       const go = customButtons[0], back = customButtons[1], shuf = customButtons[2];
       go.x = W / 2 - go.w / 2; go.y = H - 84;
@@ -2547,28 +2920,33 @@
     function tick() {
       game.ticks++; game.stateTimer++;
       updateParticles(); updatePopups();
-      if (camera.shake > 0) { camera.shake *= 0.88; if (camera.shake < 0.3) camera.shake = 0; }
+      for (const P of players) { const c = P.camera; if (c.shake > 0) { c.shake *= 0.88; if (c.shake < 0.3) c.shake = 0; } }
       const S = game.state;
       if (S === GAME_STATE.WELCOME || S === GAME_STATE.CUSTOM) return;
       if (S === GAME_STATE.MAP) { updateTravel(); return; }
       if (S === GAME_STATE.LEVEL_INTRO) {   // the world turns while the player reads; nothing launches until they do
-        stepWorld(); computePrediction(); updateCamera();
+        stepWorld(); updateViews();
         return;
       }
       if (S === GAME_STATE.PLAYING) {
-        handleInput(); updatePower();
+        for (const P of players) { usePlayer(P); handleInput(); updatePower(); }
         rivalPlanSpent = 0;   // the rivals take turns going first, so a slow planner cannot starve the others
         for (let j = 0; j < rivals.length; j++) { rival = rivals[(j + game.ticks) % rivals.length]; rivalThink(); rivalInput(); }
         stepWorld();
-        if (!rocket.dead) { checkCollisions(); collectItems(); }
+        for (const P of players) { if (game.state !== GAME_STATE.PLAYING) break; usePlayer(P); if (!rocket.dead) { checkCollisions(); collectItems(); } }
         for (const r of rivals) { if (game.state !== GAME_STATE.PLAYING || r.dead) continue; rival = r; rivalCollisions(); rivalCollect(); }
-        if (game.state === GAME_STATE.PLAYING) { updateTimer(); updateCombo(); handleRespawn(); for (const r of rivals) { rival = r; rivalRespawn(); } }
+        if (game.state === GAME_STATE.PLAYING) {
+          updateTimer();
+          for (const P of players) { if (game.state !== GAME_STATE.PLAYING) break; usePlayer(P); updateCombo(); handleRespawn(); }
+          for (const r of rivals) { rival = r; rivalRespawn(); }
+        }
         if (game.abandonArmed > 0) game.abandonArmed--;
-        computePrediction(); updateCamera(); syncEngineAudio();
+        updateViews(); syncEngineAudio();
         return;
       }
-      stepWorld(); computePrediction(); updateCamera();   // level complete / game over / win: the world keeps drifting
+      stepWorld(); updateViews();   // level complete / game over / win: the world keeps drifting
     }
+    function updateViews() { for (const P of players) { usePlayer(P); computePrediction(); updateCamera(); } usePlayer(players[0]); }
 
     function render() {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -2577,27 +2955,41 @@
       if (game.state === GAME_STATE.CUSTOM) { drawCustom(); return; }
       if (game.state === GAME_STATE.WELCOME || !game.level) { drawWelcome(); return; }
 
-      drawStars(-camera.offsetX / camera.scale, -camera.offsetY / camera.scale, game.ticks);
-      const sx = camera.shake ? (Math.random() - 0.5) * camera.shake : 0;
-      const sy = camera.shake ? (Math.random() - 0.5) * camera.shake : 0;
-      ctx.setTransform(camera.scale, 0, 0, camera.scale, W / 2 + camera.offsetX + sx, H / 2 + camera.offsetY + sy);
-      drawOrbitRings();
-      drawSun();
-      drawAsteroids();
-      for (const p of planets) drawPlanet(p);
-      drawCollectibles();
-      drawTrail();
-      drawPrediction();
-      drawParticles();
-      drawRivals();
-      drawRocket();
+      const split = players.length > 1;
+      for (const P of players) {   // each player's view of the world, side by side when there are two
+        usePlayer(P);
+        withView(P, () => {
+          ctx.save();
+          if (split) { ctx.beginPath(); ctx.rect(VX, 0, W, H); ctx.clip(); }
+          ctx.setTransform(1, 0, 0, 1, VX, 0);
+          drawStars(-camera.offsetX / camera.scale, -camera.offsetY / camera.scale, game.ticks);
+          const sx = camera.shake ? (Math.random() - 0.5) * camera.shake : 0;
+          const sy = camera.shake ? (Math.random() - 0.5) * camera.shake : 0;
+          ctx.setTransform(camera.scale, 0, 0, camera.scale, VX + W / 2 + camera.offsetX + sx, H / 2 + camera.offsetY + sy);
+          drawOrbitRings();
+          drawSun();
+          drawAsteroids();
+          for (const p of planets) drawPlanet(p);
+          drawCollectibles();
+          drawTrail();
+          drawPrediction();
+          drawParticles();
+          drawRivals();
+          drawRockets();
 
+          ctx.setTransform(1, 0, 0, 1, VX, 0);
+          drawRivalLabels();
+          drawPopups();
+          drawTargetArrow();
+          drawHUD();
+          drawMinimap();
+          ctx.restore();
+        });
+      }
+      usePlayer(players[0]);
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      drawRivalLabels();
-      drawPopups();
-      drawTargetArrow();
-      drawHUD();
-      drawMinimap();
+      if (split) { ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillRect(Math.floor(W / 2) - 1, 0, 2, H); }
+      drawTopBar();
       if (game.state === GAME_STATE.LEVEL_INTRO) drawLevelIntro();
       else if (game.state === GAME_STATE.LEVEL_COMPLETE) drawLevelComplete();
       else if (game.state === GAME_STATE.GAME_OVER) drawGameOver();
@@ -2620,12 +3012,7 @@
     const devLevel = parseInt(new URLSearchParams(location.search).get('level'));
     if (devLevel >= 1 && devLevel <= LEVELS.length) { newGame(devLevel - 1); beginPlay(); }
     const devCustom = new URLSearchParams(location.search).get('custom');   // planets,size,rivals,skill[,seed]: straight into a custom system
-    if (devCustom) {
-      const v = devCustom.split(',').map(Number);
-      CUSTOM_ROWS.forEach((row, i) => { if (!isNaN(v[i])) custom[row.key] = clamp(v[i], row.min, row.max); });
-      if (v[4] > 0) custom.seed = v[4];
-      custom.level = makeCustomLevel(custom); newGame(-1); beginPlay();
-    }
+    if (devCustom) { applyCustomParam(devCustom); newGame(-1); beginPlay(); }
     requestAnimationFrame(loop);
   </script>
 </body>
