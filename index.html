@@ -1956,10 +1956,14 @@
           else if (k === '1' || k === '2') setPlayers(+k);
           else if (k === 'p' || k === 'P') setPlayers(3 - players.length);
           else if (k === 'o' || k === 'O' || k === '3') openLobby(null);
+          else if (k === 'j' || k === 'J') { const r = netRooms(); if (r.length) netJoin(r[0].slot); else openLobby(null); }   // the first game waiting
         } else if (S === GAME_STATE.LOBBY) {
           if (k === 'Escape') lobbyBack();
-          else if (lobby.mode === null && (k === 'h' || k === 'H')) netHost();
+          else if (online()) {}   // a join from the list is under way: only ESC
+          else if (lobby.mode === null && (k === 'h' || k === 'H')) netHost(true);
+          else if (lobby.mode === null && (k === 'p' || k === 'P')) netHost(false);
           else if (lobby.mode === null && (k === 'j' || k === 'J')) openLobby('join');
+          else if (lobby.mode === null && k >= '1' && k <= '9') { const r = netRooms()[+k - 1]; if (r) netJoin(r.slot); }
           else if (lobby.mode === 'host' && (k === 'c' || k === 'C')) netCopyLink();
         } else if (isGuest()) {   // a guest only watches the host choose, and can leave
           if (k === 'Escape' || k === 'x' || k === 'X') netLeave();
@@ -2344,19 +2348,24 @@
         try { CG.sdk.game.addSettingsChangeListener(s => { if (s && s.muteAudio !== undefined && s.muteAudio !== OrbitalAudio.isMuted()) OrbitalAudio.toggleMute(); }); } catch (e) {}
         let room = null;
         try { room = CG.sdk.game.getInviteParam('room'); } catch (e) {}
-        if (room) { lobby.joinCode = String(room).toUpperCase().slice(0, 4); openLobby('join'); }
+        if (room) { if (netIsSlot(String(room))) netJoin(String(room)); else { lobby.joinCode = String(room).toUpperCase().slice(0, 4); openLobby('join'); } }
         else if (CG.sdk.game.isInstantMultiplayer) openLobby(null);
       }).catch(() => {});
     }
     // ---------- Online play ----------
-    // Two pilots in two browsers, talking directly over WebRTC; PeerJS's public broker pairs them by a four-letter
-    // room code. The host runs the whole simulation and sends the state twenty times a second; the guest sends its
-    // controls, flies its own ship between snapshots, and draws what it is told. Both see only their own view.
+    // Two pilots in two browsers, talking directly over WebRTC; PeerJS's public broker pairs them. A public game sits
+    // in one of six fixed rooms that every welcome screen quietly knocks on, so it shows up there for anyone to join;
+    // a private game gets a four-letter code instead. The host runs the whole simulation and sends the state twenty
+    // times a second; the guest sends its controls, flies its own ship between snapshots, and draws what it is told.
     const NET_SNAP_EVERY = 3, NET_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', NET_LIB = 'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';
+    const NET_SLOTS = 6, NET_PROBE_EVERY = 20000, NET_PROBE_TIMEOUT = 12000;   // public rooms, and how often (ms) a welcome screen looks for them
+    const NET_SIGNS = ['VEGA', 'ALTAIR', 'DENEB', 'RIGEL', 'SIRIUS', 'POLLUX', 'CASTOR', 'MIZAR', 'SPICA', 'ANTARES', 'CAPELLA', 'ARCTURUS', 'PROCYON', 'ALGOL', 'MIRA', 'NAOS', 'ATLAS', 'MAIA', 'ELNATH', 'HAMAL', 'REGULUS', 'CANOPUS'];
     const NET_ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }] };
     const net = {
       role: null,            // null, 'host' or 'guest'
-      status: '', error: '', code: '', peer: null, conn: null, libReady: false, libLoading: false,
+      status: '', error: '', code: '', room: '', peer: null, conn: null, libReady: false, libLoading: false, libWaiters: [],
+      pub: false, pubFull: false, callSign: '', watchers: [],   // a public host: its room is listed, and welcome screens watching it are told when it fills
+      browser: null, slots: {}, busy: {}, browseAt: -1e9, joinName: '',   // looking for public games: one probe connection per room
       rtt: 0, pingSent: 0, lastSnapT: -1, ack: 0, hostMax: 0, hostCleared: 0,
       input: { s: 0, t: 0, u: 0, b: 0, c: 0, n: 0 },   // the guest's latest controls, as the host applies them
       navToggles: 0, navApplied: 0, events: [], hist: [], notice: '',
@@ -2370,21 +2379,26 @@
     function viewPlayers() { return online() ? [localPlayer()] : players; }
     function unlockedUpTo() { return isGuest() ? net.hostMax : maxLevelReached; }
     function clearedCount() { return isGuest() ? net.hostCleared : cleared; }
-    function netLoadLib(cb) {   // PeerJS is fetched only when someone goes online
+    function netLoadLib(cb, quiet) {   // PeerJS is fetched the first time someone goes online or a screen looks for games
       if (window.Peer) { net.libReady = true; cb(); return; }
+      net.libWaiters.push(cb);
+      if (!quiet) net.status = 'Loading…';
       if (net.libLoading) return;
-      net.libLoading = true; net.status = 'Loading…';
+      net.libLoading = true;
       const s = document.createElement('script');
       s.src = NET_LIB;
-      s.onload = () => { net.libReady = true; net.libLoading = false; cb(); };
-      s.onerror = () => { net.libLoading = false; net.error = 'Could not load the network library. Check your connection.'; net.status = ''; };
+      s.onload = () => { net.libReady = true; net.libLoading = false; net.libWaiters.splice(0).forEach(f => f()); };
+      s.onerror = () => { net.libLoading = false; net.libWaiters.length = 0; if (!quiet) { net.error = 'Could not load the network library. Check your connection.'; net.status = ''; } };
       document.head.appendChild(s);
     }
     function netCode() { let c = ''; for (let i = 0; i < 4; i++) c += NET_CODE_CHARS[Math.floor(Math.random() * NET_CODE_CHARS.length)]; return c; }
+    function netCallSign() { return `${NET_SIGNS[Math.floor(Math.random() * NET_SIGNS.length)]} ${10 + Math.floor(Math.random() * 90)}`; }
+    function netSlotId(n) { return 'pub-' + n; }
+    function netIsSlot(room) { return /^pub-\d+$/i.test(room || ''); }
     function netLink() {   // on CrazyGames the platform makes the invite link; elsewhere it is this page with ?join=
       let link = '';
-      cg(g => { link = g.inviteLink({ room: net.code }) || ''; });
-      return link || `${location.origin}${location.pathname}?join=${net.code}`;
+      cg(g => { link = g.inviteLink({ room: net.room }) || ''; });
+      return link || `${location.origin}${location.pathname}?join=${net.room}`;
     }
     function openLobby(mode) {
       game.state = GAME_STATE.LOBBY; game.stateTimer = 0; game.level = null; game.inRun = false;
@@ -2403,16 +2417,31 @@
       net.role = role; net.rtt = 0; net.lastSnapT = -1; net.ack = 0; net.events.length = 0; net.hist.length = 0;
       net.navToggles = 0; net.navApplied = 0; net.input = { s: 0, t: 0, u: 0, b: 0, c: 0, n: 0 };
     }
-    function netHost() {
-      lobby.mode = 'host'; net.error = ''; net.code = ''; joinInput.style.display = 'none';
+    function netInfo() { return { k: 'info', open: !net.conn, name: net.callSign, cleared: Math.min(cleared, LEVELS.length) }; }
+    function netTellWatchers() {   // the welcome screens looking at this room: it has filled, or it is gone
+      for (const c of net.watchers.splice(0)) { try { if (c.open) { c.send(Object.assign(netInfo(), { open: false })); setTimeout(() => { try { c.close(); } catch (e) {} }, 300); } else c.close(); } catch (e) {} }
+    }
+    function netHost(pub) {   // a public game takes the first free public room; a private one gets a code
+      lobby.mode = 'host'; net.error = ''; net.code = ''; net.room = ''; net.pub = !!pub; net.pubFull = false; joinInput.style.display = 'none';
+      netBrowseStop();
       netLoadLib(() => {
         netSetup('host');
-        const tryCode = () => {
-          net.code = netCode(); net.status = 'Opening the room…';
-          const peer = net.peer = new Peer('orbital-' + net.code, { config: NET_ICE, debug: 0 });
-          peer.on('open', () => { if (net.peer !== peer) return; net.status = 'Waiting for a pilot to join…'; cg(g => g.updateRoom({ roomId: net.code, isJoinable: true, inviteParams: { room: net.code } })); });
+        net.callSign = netCallSign();
+        let slot = 0;
+        const tryRoom = () => {
+          if (net.pub && ++slot > NET_SLOTS) { net.pub = false; net.pubFull = true; }   // every public room is busy: fall back to a code
+          net.room = net.pub ? netSlotId(slot) : netCode(); net.code = net.pub ? '' : net.room;
+          net.status = 'Opening the room…';
+          const peer = net.peer = new Peer('orbital-' + net.room, { config: NET_ICE, debug: 0 });
+          peer.on('open', () => { if (net.peer !== peer) return; net.status = net.pub ? 'Listed for everyone. Waiting for a pilot…' : 'Waiting for a pilot to join…'; cg(g => g.updateRoom({ roomId: net.room, isJoinable: true, inviteParams: { room: net.room } })); });
           peer.on('connection', conn => {
             if (net.peer !== peer) return;
+            if (conn.metadata && conn.metadata.browse) {   // a welcome screen asking who is here
+              conn.on('open', () => { if (net.peer !== peer) { conn.close(); return; } try { conn.send(netInfo()); } catch (e) {} if (net.conn) setTimeout(() => { try { conn.close(); } catch (e) {} }, 300); else net.watchers.push(conn); });
+              const drop = () => { const i = net.watchers.indexOf(conn); if (i >= 0) net.watchers.splice(i, 1); };
+              conn.on('close', drop); conn.on('error', drop);
+              return;
+            }
             if (net.conn) { conn.close(); return; }   // one guest only
             net.conn = conn;
             conn.on('open', () => netConnected());
@@ -2422,18 +2451,27 @@
           });
           peer.on('error', e => {
             if (net.peer !== peer) return;
-            if (e.type === 'unavailable-id') { peer.destroy(); tryCode(); return; }   // somebody has that code: pick another
+            if (e.type === 'unavailable-id') { peer.destroy(); tryRoom(); return; }   // somebody has that room: take another
             netFail(e);
           });
           peer.on('disconnected', () => { if (net.peer === peer && !net.conn) peer.reconnect(); });
         };
-        tryCode();
+        tryRoom();
       });
     }
-    function netJoin(code) {
-      code = (code || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-      if (code.length !== 4) { net.error = 'A room code has four letters or digits.'; return; }
-      lobby.joinCode = code; net.error = ''; net.code = code;
+    function netJoin(code) {   // a four-letter code, or the id of a public room picked from a list
+      let room = String(code || '').trim();
+      if (netIsSlot(room)) room = room.toLowerCase();
+      else {
+        room = room.toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (room.length !== 4) { net.error = 'A room code has four letters or digits.'; return; }
+        lobby.joinCode = room;
+      }
+      if (online()) return;
+      const listed = netRooms().find(r => r.slot === room);
+      net.error = ''; net.room = room; net.code = netIsSlot(room) ? '' : room; net.joinName = listed ? listed.name : '';
+      netBrowseStop();
+      if (game.state !== GAME_STATE.LOBBY) openLobby(netIsSlot(room) ? null : 'join');
       netLoadLib(() => {
         netSetup('guest');
         net.status = 'Connecting…';
@@ -2441,7 +2479,7 @@
         const peer = net.peer = new Peer({ config: NET_ICE, debug: 0 });
         peer.on('open', () => {
           if (net.peer !== peer) return;
-          const conn = net.conn = peer.connect('orbital-' + code, { reliable: true, serialization: 'json' });
+          const conn = net.conn = peer.connect('orbital-' + room, { reliable: true, serialization: 'json' });
           conn.on('open', () => netConnected());
           conn.on('data', netReceive);
           conn.on('close', () => netLost('The host left.'));
@@ -2451,7 +2489,7 @@
       });
     }
     function netFail(e) {
-      const why = e && e.type === 'peer-unavailable' ? `No room with the code ${net.code}.` : e && e.type === 'network' ? 'Could not reach the lobby server.' : `Connection error${e && e.type ? ` (${e.type})` : ''}.`;
+      const why = e && e.type === 'peer-unavailable' ? (netIsSlot(net.room) ? 'That game is gone.' : `No room with the code ${net.room}.`) : e && e.type === 'network' ? 'Could not reach the lobby server.' : `Connection error${e && e.type ? ` (${e.type})` : ''}.`;
       netReset();
       net.error = why; net.status = '';
       if (game.state !== GAME_STATE.LOBBY) openLobby(null);
@@ -2460,17 +2498,67 @@
       const peer = net.peer; net.peer = null; net.conn = null;
       joinInput.style.display = 'none';
       cg(g => g.leftRoom());
+      netTellWatchers();
       if (peer) { try { peer.destroy(); } catch (e) {} }
-      net.role = null; net.status = ''; net.code = '';
+      net.role = null; net.status = ''; net.code = ''; net.room = ''; net.pub = false;
       setPlayers(1);
     }
     function netConnected() {
       net.status = 'Connected';
       joinInput.style.display = 'none';
       cg(g => g.updateRoom({ isJoinable: false }));
+      netTellWatchers();
       OrbitalAudio.sfx.arrive();
       if (isHost()) { openMap(maxLevelReached); netSendMap(); }
       else { game.state = GAME_STATE.MAP; game.stateTimer = 0; game.level = null; map.selected = 0; map.travel = null; startButton.style.display = 'none'; OrbitalAudio.startMusic('ambient'); }
+    }
+    // Looking for public games: the welcome screen and the lobby knock on each public room. A host that is waiting
+    // answers with its call sign and keeps the line open, so the row disappears the moment the game fills or ends.
+    function netBrowsing() { return !online() && (game.state === GAME_STATE.WELCOME || (game.state === GAME_STATE.LOBBY && lobby.mode === null)); }
+    function netRooms() { return Object.values(net.slots).filter(S => S.info).map(S => S.info); }
+    function netProbeDone(slot, busy) {
+      const S = net.slots[slot]; if (!S) return;
+      delete net.slots[slot];
+      if (busy) net.busy[slot] = performance.now() + 60000;   // a game is on in there: no point asking again for a while
+      try { S.conn.close(); } catch (e) {}
+    }
+    function netBrowse() {
+      if (!window.Peer) { netLoadLib(() => { net.browseAt = -1e9; }, true); return; }
+      let peer = net.browser;
+      if (!peer || peer.destroyed) {
+        peer = net.browser = new Peer({ config: NET_ICE, debug: 0 });
+        peer.on('open', () => { if (net.browser === peer) net.browseAt = -1e9; });
+        peer.on('error', e => {
+          if (net.browser !== peer) return;
+          const m = /orbital-(pub-\d+)/.exec((e && e.message) || '');
+          if (e && e.type === 'peer-unavailable' && m) netProbeDone(m[1], false);   // nobody is hosting there
+        });
+        peer.on('disconnected', () => { if (net.browser === peer) { try { peer.reconnect(); } catch (e) {} } });
+        return;
+      }
+      if (!peer.open) return;
+      const now = performance.now();
+      for (let n = 1; n <= NET_SLOTS; n++) {
+        const slot = netSlotId(n);
+        if (net.slots[slot] || net.busy[slot] > now) continue;
+        const conn = peer.connect('orbital-' + slot, { metadata: { browse: 1 }, reliable: true, serialization: 'json' });
+        const S = net.slots[slot] = { conn, at: now, info: null };
+        conn.on('data', m => { if (net.slots[slot] !== S || !m || m.k !== 'info') return; if (m.open) S.info = { slot, name: m.name, cleared: m.cleared }; else netProbeDone(slot, true); });
+        conn.on('close', () => { if (net.slots[slot] === S) netProbeDone(slot, false); });
+        conn.on('error', () => { if (net.slots[slot] === S) netProbeDone(slot, false); });
+      }
+    }
+    function netBrowseTick() {   // every tick: look while the list is on screen, forget it when it is not
+      if (!netBrowsing()) { if (net.browser) netBrowseStop(); return; }
+      const now = performance.now();
+      for (const slot in net.slots) { const S = net.slots[slot]; if (!S.info && now - S.at > NET_PROBE_TIMEOUT) netProbeDone(slot, false); }
+      if (now - net.browseAt >= NET_PROBE_EVERY && !document.hidden) { net.browseAt = now; netBrowse(); }
+    }
+    function netBrowseStop() {
+      const peer = net.browser; net.browser = null;
+      for (const slot in net.slots) netProbeDone(slot, false);
+      net.browseAt = -1e9;
+      if (peer) { try { peer.destroy(); } catch (e) {} }
     }
     function netLost(why) {   // the other side went away: the run is over
       if (!online()) return;
@@ -2650,24 +2738,67 @@
     }
     // ---------- The lobby screen ----------
     const lobbyButtons = [
-      { id: 'host', label: 'HOST A GAME', key: 'H', color: '#4fc3f7', x: 0, y: 0, w: 220, h: 48, press() { netHost(); }, release() {}, active: () => false, enabled: () => true, when: () => lobby.mode === null },
-      { id: 'join', label: 'JOIN A GAME', key: 'J', color: '#fb923c', x: 0, y: 0, w: 220, h: 48, press() { openLobby('join'); }, release() {}, active: () => false, enabled: () => true, when: () => lobby.mode === null },
+      { id: 'host', label: 'HOST A GAME', key: 'H', color: '#4fc3f7', x: 0, y: 0, w: 200, h: 48, press() { netHost(true); }, release() {}, active: () => false, enabled: () => true, when: () => lobby.mode === null && !online() },
+      { id: 'private', label: 'PRIVATE GAME', key: 'P', color: '#facc15', x: 0, y: 0, w: 200, h: 48, press() { netHost(false); }, release() {}, active: () => false, enabled: () => true, when: () => lobby.mode === null && !online() },
+      { id: 'join', label: 'JOIN BY CODE', key: 'J', color: '#fb923c', x: 0, y: 0, w: 200, h: 48, press() { openLobby('join'); }, release() {}, active: () => false, enabled: () => true, when: () => lobby.mode === null && !online() },
       { id: 'connect', label: 'CONNECT', key: 'ENTER', color: '#4fc3f7', x: 0, y: 0, w: 190, h: 48, press() { netJoin(joinInput.value); }, release() {}, active: () => false, enabled: () => !net.role, when: () => lobby.mode === 'join' },
-      { id: 'copy', label: 'COPY LINK', key: 'C', color: '#facc15', x: 0, y: 0, w: 170, h: 40, press() { netCopyLink(); }, release() {}, active: () => false, enabled: () => !!net.code, when: () => lobby.mode === 'host' },
+      { id: 'copy', label: 'COPY LINK', key: 'C', color: '#facc15', x: 0, y: 0, w: 170, h: 40, press() { netCopyLink(); }, release() {}, active: () => false, enabled: () => !!net.room, when: () => lobby.mode === 'host' },
       { id: 'back', label: 'BACK', key: 'ESC', color: '#cbd5e1', x: 0, y: 0, w: 130, h: 40, press() { lobbyBack(); }, release() {}, active: () => false, enabled: () => true, when: () => true },
     ];
     let copyNote = 0;
     function netCopyLink() {
-      if (!net.code) return;
+      if (!net.room) return;
       const text = netLink();
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => { copyNote = 120; }, () => {});
       OrbitalAudio.sfx.select();
     }
     function lobbyBack() {
+      if (online()) netReset();   // a room being opened or joined is abandoned
       if (lobby.mode === null) { joinInput.style.display = 'none'; toWelcome(); return; }
-      netReset(); openLobby(null);
+      openLobby(null);
     }
-    function lobbyButtonAt(x, y) { return lobbyButtons.find(b => b.when() && hit(b, x, y)) || null; }
+    function lobbyButtonAt(x, y) { return roomRowAt(x, y) || lobbyButtons.find(b => b.when() && hit(b, x, y)) || null; }
+    // The public games on screen: one row each, a click or tap joins (on the welcome screen and in the lobby)
+    const roomRows = [];
+    const roomMore = { x: 0, y: 0, w: 0, h: 0, on: false, press() { openLobby(null); OrbitalAudio.sfx.select(); } };   // "N more": the lobby lists them all
+    function roomRowAt(x, y) { return roomRows.find(r => hit(r, x, y)) || (roomMore.on && hit(roomMore, x, y) ? roomMore : null); }
+    function drawRoomRows(cx, y, max) {   // draws up to max rows from y down; returns the height used
+      const rooms = netRooms(), shown = rooms.slice(0, Math.max(0, max)), more = rooms.length - shown.length;
+      roomRows.length = shown.length; roomMore.on = false;
+      if (!rooms.length) return 0;
+      const rw = Math.min(560, W - 32), rh = 26, pitch = 32;
+      ctx.save();
+      ctx.textBaseline = 'middle'; ctx.lineWidth = 1.5;
+      shown.forEach((info, i) => {
+        const r = roomRows[i] || (roomRows[i] = { slot: '', x: 0, y: 0, w: 0, h: rh, press() { netJoin(this.slot); OrbitalAudio.sfx.select(); } });
+        r.slot = info.slot; r.x = cx - rw / 2; r.y = y + i * pitch; r.w = rw;
+        const hot = hoverButton === r;
+        roundRectPath(r.x, r.y, rw, rh, 13);
+        ctx.fillStyle = hot ? 'rgba(250,204,21,0.22)' : 'rgba(250,204,21,0.08)'; ctx.fill();
+        ctx.strokeStyle = hot ? '#facc15' : 'rgba(250,204,21,0.5)'; ctx.stroke();
+        ctx.textAlign = 'left'; ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#facc15';
+        ctx.fillText(info.name, r.x + 14, r.y + rh / 2 + 1);
+        const nw = ctx.measureText(info.name).width;
+        ctx.font = '13px monospace'; ctx.fillStyle = 'rgba(255,255,255,0.75)';
+        const room = rw - 14 - nw - 10 - 80;   // what is left for the status, beside the JOIN tag
+        const status = [`·  ${info.cleared} SYSTEMS CLEARED  ·  WAITING FOR A PILOT`, `·  ${info.cleared} CLEARED  ·  WAITING`, `·  ${info.cleared} CLEARED`].find(t => ctx.measureText(t).width <= room) || '';
+        ctx.fillText(status, r.x + 14 + nw + 10, r.y + rh / 2 + 1);
+        ctx.textAlign = 'right'; ctx.font = 'bold 12px SpaceFont, Arial'; ctx.fillStyle = hot ? 'white' : '#facc15';
+        ctx.fillText('JOIN ▸', r.x + rw - 12, r.y + rh / 2 + 1);
+      });
+      let used = shown.length * pitch;
+      if (more > 0) {
+        const label = shown.length ? `+ ${more} MORE IN THE ONLINE LOBBY` : `${rooms.length} ONLINE GAME${rooms.length > 1 ? 'S' : ''} WAITING  ·  ${touchUI ? 'TAP' : 'PRESS O'} TO JOIN`;
+        ctx.textAlign = 'center'; ctx.font = 'bold 13px monospace';
+        const tw = ctx.measureText(label).width;
+        Object.assign(roomMore, { x: cx - tw / 2 - 10, y: y + used - (shown.length ? 2 : 0), w: tw + 20, h: 22, on: true });
+        ctx.fillStyle = hoverButton === roomMore ? 'white' : '#facc15';
+        ctx.fillText(label, cx, roomMore.y + 11);
+        used += 24;
+      }
+      ctx.restore();
+      return used;
+    }
     function drawLobby() {
       const t = game.ticks, short = H < 520;
       drawStars(t * 0.1, 0, t);
@@ -2680,32 +2811,53 @@
       const cy = H / 2 - (short ? 20 : 30);
       if (lobby.mode === null) {
         ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.font = '15px monospace';
-        ctx.fillText('One of you hosts and gets a four-letter room code; the other joins with it.', W / 2, cy - 70);
-        ctx.fillText('Fly together on ore quotas, or race each other and the rivals.', W / 2, cy - 46);
-        const h = lobbyButtons[0], j = lobbyButtons[1];
-        h.x = W / 2 - h.w - 12; h.y = cy + 10; j.x = W / 2 + 12; j.y = cy + 10;
-        drawButton(h); drawButton(j);
+        ctx.fillText('Host a game and anyone who opens Orbital can join it from the welcome screen.', W / 2, short ? 80 : cy - 96);
+        ctx.fillText('A private game needs its four-letter code. Fly together on quotas, or race.', W / 2, short ? 102 : cy - 72);
+        const top = short ? 124 : cy - 40, rooms = netRooms();
+        let used = online() ? 0 : drawRoomRows(W / 2, top, short ? 2 : 4);
+        if (online()) {   // joining a game picked from the list
+          ctx.fillStyle = `rgba(79,195,247,${0.5 + 0.3 * Math.sin(t * 0.1)})`; ctx.font = '14px monospace';
+          ctx.fillText(`JOINING ${net.joinName || 'THE GAME'}…`, W / 2, top + 10);
+          used = 32;
+        } else if (!rooms.length) {
+          const looking = !net.browser || !net.browser.open || (performance.now() - net.browseAt < 6000 && Object.values(net.slots).some(S => !S.info));
+          ctx.fillStyle = looking ? `rgba(79,195,247,${0.5 + 0.3 * Math.sin(t * 0.1)})` : 'rgba(255,255,255,0.45)'; ctx.font = '14px monospace';
+          ctx.fillText(looking ? 'LOOKING FOR PUBLIC GAMES…' : 'NO PUBLIC GAME IS WAITING RIGHT NOW. HOST ONE!', W / 2, top + 10);
+          used = 32;
+        }
+        const h = lobbyButtons[0], p = lobbyButtons[1], j = lobbyButtons[2], by = top + used + (short ? 6 : 16);
+        if (W >= 720) { h.x = W / 2 - h.w - 12 - p.w / 2; p.x = W / 2 - p.w / 2; j.x = W / 2 + p.w / 2 + 12; h.y = p.y = j.y = by; }
+        else { h.x = p.x = j.x = W / 2 - h.w / 2; h.y = by; p.y = by + 56; j.y = by + 112; }
+        if (!online()) { drawButton(h); drawButton(p); drawButton(j); }
       } else if (lobby.mode === 'host') {
         ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '15px monospace';
-        ctx.fillText('YOUR ROOM CODE', W / 2, cy - 70);
-        ctx.fillStyle = net.code ? '#facc15' : 'rgba(255,255,255,0.3)'; ctx.font = 'bold 72px monospace';
-        ctx.fillText(net.code ? net.code.split('').join(' ') : '· · · ·', W / 2, cy - 10);
-        ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '14px monospace';
-        if (net.code) { ctx.fillText('Tell the other pilot the code, or send them this link:', W / 2, cy + 44); ctx.fillStyle = '#4fc3f7'; ctx.fillText(netLink(), W / 2, cy + 66); }
-        const c = lobbyButtons[3]; c.x = W / 2 - c.w / 2; c.y = cy + 90; c.label = copyNote > 0 ? 'LINK COPIED' : 'COPY LINK';
+        if (net.pub) {
+          ctx.fillText('YOUR GAME IS LISTED FOR ANYONE TO JOIN', W / 2, cy - 70);
+          ctx.fillStyle = net.room ? '#facc15' : 'rgba(255,255,255,0.3)'; ctx.font = 'bold 48px monospace';
+          ctx.fillText(net.room ? net.callSign : '· · ·', W / 2, cy - 10);
+          ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '14px monospace';
+          if (net.room) { ctx.fillText('It shows on the welcome screen of everyone who opens Orbital. Or send this link:', W / 2, cy + 44); ctx.fillStyle = '#4fc3f7'; ctx.fillText(netLink(), W / 2, cy + 66); }
+        } else {
+          ctx.fillText(net.pubFull ? 'EVERY PUBLIC ROOM IS BUSY, SO THIS GAME IS PRIVATE' : 'YOUR ROOM CODE', W / 2, cy - 70);
+          ctx.fillStyle = net.code ? '#facc15' : 'rgba(255,255,255,0.3)'; ctx.font = 'bold 72px monospace';
+          ctx.fillText(net.code ? net.code.split('').join(' ') : '· · · ·', W / 2, cy - 10);
+          ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '14px monospace';
+          if (net.code) { ctx.fillText('Tell the other pilot the code, or send them this link:', W / 2, cy + 44); ctx.fillStyle = '#4fc3f7'; ctx.fillText(netLink(), W / 2, cy + 66); }
+        }
+        const c = lobbyButtons[4]; c.x = W / 2 - c.w / 2; c.y = cy + 90; c.label = copyNote > 0 ? 'LINK COPIED' : 'COPY LINK';
         drawButton(c);
         if (copyNote > 0) copyNote--;
       } else if (lobby.mode === 'join') {
         ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '15px monospace';
         ctx.fillText('ENTER THE HOST\'S ROOM CODE', W / 2, cy - 70);
         joinInput.style.top = `${cy - 10}px`;
-        const c = lobbyButtons[2]; c.x = W / 2 - c.w / 2; c.y = cy + 50;
+        const c = lobbyButtons[3]; c.x = W / 2 - c.w / 2; c.y = cy + 50;
         drawButton(c);
       }
       ctx.textAlign = 'center'; ctx.font = '15px monospace';
       if (net.error) { ctx.fillStyle = '#ff5252'; ctx.fillText(net.error, W / 2, H - (short ? 84 : 120)); }
       else if (net.status) { ctx.fillStyle = `rgba(79,195,247,${0.6 + 0.4 * Math.sin(t * 0.1)})`; ctx.fillText(net.status, W / 2, H - (short ? 84 : 120)); }
-      const back = lobbyButtons[4]; back.x = 16; back.y = H - 56; drawButton(back);
+      const back = lobbyButtons[5]; back.x = 16; back.y = H - 56; drawButton(back);
       ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace';
       ctx.fillText('Browsers connect to each other directly; a few networks block that, in which case try the other pilot hosting.', W / 2, H - 18);
       ctx.restore();
@@ -3124,7 +3276,9 @@
         ctx.fillText(`LAST RUN  ${game.score}`, cx, cy + 30);
       }
       ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.font = W < 760 ? '12px monospace' : '14px monospace';
-      if (players.length > 1 && H < 520) {
+      const chipY = H * 0.66 + (H < 520 ? 36 : 56), roomsShown = drawWelcomeChips(cx, chipY);
+      if (roomsShown && H < 520) {   // no room for the key help under the games line on a short screen
+      } else if (players.length > 1 && H < 520) {
         ctx.fillText('P1  WASD + LEFT SHIFT     P2  ARROWS + RIGHT SHIFT', cx, H - 48);
       } else if (players.length > 1) {
         ctx.fillStyle = '#4fc3f7'; ctx.fillText(`P1  ${KEY_HELP.P1}`, cx, H - 70);
@@ -3135,13 +3289,13 @@
                              : 'ARROWS / WASD  steer & thrust     SPACE  booster     F  camera follow     M  music     X  abandon run', cx, H - 48);
       }
       ctx.fillText(`${LEVELS.length} STAR SYSTEMS   ·   SOUND ${OrbitalAudio.isMuted() ? 'OFF' : 'ON'}`, cx, H - 26);
-      drawWelcomeChips(cx, H * 0.66 + (H < 520 ? 36 : 56));
       startButton.style.display = 'block';
     }
-    // How many pilots: chips under the start button on the welcome screen (1 / 2 or P on the keyboard)
+    // How many pilots: chips under the start button on the welcome screen (1 / 2 or P on the keyboard), and under
+    // them the public games waiting online, if any, each a row to join
     const welcomeChips = [[1, '1 PLAYER'], [2, '2 PLAYERS'], [3, 'ONLINE']].map(([n, label]) => ({ n, label, x: 0, y: 0, w: 120, h: 30, press() { if (n === 3) openLobby(null); else setPlayers(n); OrbitalAudio.sfx.select(); } }));
-    function welcomeChipAt(x, y) { return welcomeChips.find(c => hit(c, x, y)) || null; }
-    function drawWelcomeChips(cx, y) {
+    function welcomeChipAt(x, y) { return welcomeChips.find(c => hit(c, x, y)) || roomRowAt(x, y); }
+    function drawWelcomeChips(cx, y) {   // returns true when games are listed
       ctx.save();
       ctx.font = 'bold 13px SpaceFont, Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineWidth = 1.5;
       welcomeChips.forEach((c, i) => {
@@ -3153,8 +3307,11 @@
         ctx.fillStyle = on ? 'white' : 'rgba(255,255,255,0.7)';
         ctx.fillText(c.label, c.x + c.w / 2, c.y + c.h / 2 + 1);
       });
-      if (net.notice) { ctx.fillStyle = '#fb923c'; ctx.font = '14px monospace'; ctx.fillText(net.notice, cx, y + 50); }
+      const top = y + 42, maxRows = Math.floor((H - 62 - top) / 32), rooms = netRooms().length;
+      const used = rooms ? drawRoomRows(cx, maxRows >= 1 ? top : y + 36, maxRows) : 0;
+      if (net.notice && !rooms) { ctx.fillStyle = '#fb923c'; ctx.font = '14px monospace'; ctx.fillText(net.notice, cx, y + 50); }
       ctx.restore();
+      return used > 0;
     }
 
     function drawMap() {
@@ -3363,6 +3520,7 @@
       game.ticks++; game.stateTimer++;
       updateParticles(); updatePopups();
       for (const P of players) { const c = P.camera; if (c.shake > 0) { c.shake *= 0.88; if (c.shake < 0.3) c.shake = 0; } }
+      netBrowseTick();
       if (isGuest()) { guestTick(); return; }
       tickLocal();
       if (isHost()) netHostTick();
@@ -3459,7 +3617,7 @@
     addListeners();
     loadCustom();
     const joinParam = new URLSearchParams(location.search).get('join');   // an invite link: straight to the lobby with the code filled in
-    if (joinParam) { lobby.joinCode = joinParam.toUpperCase().slice(0, 4); openLobby('join'); }
+    if (joinParam) { if (netIsSlot(joinParam)) netJoin(joinParam); else { lobby.joinCode = joinParam.toUpperCase().slice(0, 4); openLobby('join'); } }
     cgInit();
     const devLevel = parseInt(new URLSearchParams(location.search).get('level'));
     if (devLevel >= 1 && devLevel <= LEVELS.length) { newGame(devLevel - 1); beginPlay(); }
