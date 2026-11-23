@@ -37,9 +37,15 @@
       transform: translate(-50%, -50%) scale(1.05);
     }
     .join-code {
-      position: absolute; left: 50%; transform: translate(-50%, -50%); width: 220px; padding: 8px 0;
-      font-family: monospace; font-size: 40px; text-align: center; letter-spacing: 12px; text-transform: uppercase;
+      position: absolute; left: 50%; transform: translate(-50%, -50%); width: 360px; max-width: 90vw; padding: 8px 0;
+      font-family: monospace; font-size: 32px; text-align: center; letter-spacing: 6px; text-transform: uppercase;
       color: #fff; background: rgba(255,255,255,0.08); border: 2px solid #4fc3f7; border-radius: 10px; outline: none; z-index: 100; display: none;
+    }
+    .join-code::placeholder { color: rgba(255,255,255,0.3); font-size: 20px; letter-spacing: 2px; }
+    .link-box {   /* the invite link as real text, so it can be selected and copied by hand when the clipboard is refused */
+      position: absolute; left: 50%; transform: translate(-50%, -50%); width: 640px; max-width: 92vw; padding: 7px 12px; box-sizing: border-box;
+      font-family: monospace; font-size: 14px; text-align: center; color: #4fc3f7; background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(79,195,247,0.5); border-radius: 8px; outline: none; z-index: 100; display: none;
     }
     @keyframes pulse {
       0% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0.5); }
@@ -51,7 +57,8 @@
 <body>
   <canvas id="solarSystem"></canvas>
   <button id="startButton" class="start-button">START GAME</button>
-  <input id="joinCode" class="join-code" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="CODE">
+  <input id="joinCode" class="join-code" maxlength="12" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="CODE or NAME">
+  <input id="linkBox" class="link-box" readonly>
   <script src="audio.js"></script>
   <script>
     // =====================================================================
@@ -1756,7 +1763,8 @@
         if (Math.abs(t) > 0.15) turn = clamp(t, -1, 1);
         if (joy.dy < -0.35) up = true;
       }
-      let boost = down(K.boost) || ui.boost;
+      if (me.pad) { if (me.pad.turn) turn = me.pad.turn; if (me.pad.up) up = true; }   // a controller
+      let boost = down(K.boost) || ui.boost || !!(me.pad && me.pad.boost);
       if (me.remote) { const I = net.input; turn = I.t; up = !!I.u; boost = !!I.b; }   // the other browser's pilot
       rocket.rotation += rocket.rotationSpeed * turn;
       const dx = Math.sin(rocket.rotation), dy = -Math.cos(rocket.rotation);
@@ -1804,7 +1812,7 @@
     function updatePower() {
       if (!game.level.battery || rocket.dead) { rocket.charging = false; return; }
       const dt = 1 / 60;
-      rocket.charging = (me.remote ? !!net.input.c : down(me.keys.charge) || ui.charge) && rocket.fuel > 0 && rocket.battery < BATTERY_MAX;
+      rocket.charging = (me.remote ? !!net.input.c : down(me.keys.charge) || ui.charge || !!(me.pad && me.pad.charge)) && rocket.fuel > 0 && rocket.battery < BATTERY_MAX;
       let b = rocket.battery + solarRate() * dt;
       if (rocket.charging) {
         const add = Math.min(CHARGE_RATE * dt, BATTERY_MAX - b, rocket.fuel / CHARGE_FUEL_COST);
@@ -1844,7 +1852,7 @@
       }, { passive: false });
 
       // On-screen console buttons take presses before the camera drag does.
-      function pressAt(x, y) {
+      function pressAt(x, y, fromTouch) {
         const S = game.state;
         if (S === GAME_STATE.MAP) {
           const b = mapButtonAt(x, y);
@@ -1864,7 +1872,7 @@
           if (hit(introBack, x, y)) { introBack.press(); return true; }
           return false;
         }
-        if (S === GAME_STATE.LOBBY) { const b = lobbyButtonAt(x, y); if (b) b.press(); return true; }
+        if (S === GAME_STATE.LOBBY) { const b = lobbyButtonAt(x, y); if (b) { if (fromTouch && b.late) lateTouch = b; else b.press(); } return true; }
         if (isGuest() && S !== GAME_STATE.PLAYING) return true;   // the host drives the menus
         if (S === GAME_STATE.LEVEL_COMPLETE) { if (game.stateTimer > 45) nextLevel(); return true; }       // a tap or click moves on, like SPACE
         if (S === GAME_STATE.GAME_OVER || S === GAME_STATE.WIN) { if (game.stateTimer > 90) { if (isHost()) openMap(maxLevelReached); else toWelcome(); } return true; }
@@ -1922,7 +1930,7 @@
             const b = viewButtonAt(x, y);
             if (b) { b.press(); touchButtons.set(t.identifier, { b, P: me }); continue; }
             if (pinch.pts.size < 2) { pinch.pts.set(t.identifier, { x, y }); if (pinch.pts.size === 2) { pinch.d0 = pinchDist(); pinch.z0 = localPlayer().camera.zoomMul; } }
-          } else pressAt(x, y);
+          } else pressAt(x, y, true);
         }
         e.preventDefault();   // no scrolling, zooming or simulated mouse clicks from the canvas
       }, { passive: false });
@@ -1940,19 +1948,22 @@
           pinch.pts.delete(t.identifier);
           const h = touchButtons.get(t.identifier);
           if (h) { usePlayer(h.P); h.b.release(); touchButtons.delete(t.identifier); }
+          if (lateTouch && e.type === 'touchend') { const b = lateTouch; lateTouch = null; if (game.state === GAME_STATE.LOBBY && b.when() && hit(b, t.clientX, t.clientY)) b.press(); }
         }
+        if (e.type === 'touchcancel') lateTouch = null;
       };
       canvas.addEventListener('touchend', touchEnd);
       canvas.addEventListener('touchcancel', touchEnd);
-      window.addEventListener('blur', () => { joyRelease(); pinch.pts.clear(); for (const h of touchButtons.values()) { usePlayer(h.P); h.b.release(); } touchButtons.clear(); });
+      window.addEventListener('blur', () => { joyRelease(); pinch.pts.clear(); lateTouch = null; for (const h of touchButtons.values()) { usePlayer(h.P); h.b.release(); } touchButtons.clear(); });
 
       document.addEventListener('keydown', e => {
         unlockAudio();
         const k = e.key;
-        if (document.activeElement === joinInput) {   // typing a room code
-          if (k === 'Enter') netJoin(joinInput.value); else if (k === 'Escape') lobbyBack();
+        if (document.activeElement === joinInput || document.activeElement === linkInput) {   // typing a room code, or copying the link
+          if (k === 'Enter' && document.activeElement === joinInput) netJoin(joinInput.value); else if (k === 'Escape') lobbyBack();
           return;
         }
+        if (e.isTrusted) touchUI = false;   // a real keyboard: the on-screen controls make way (a touch brings them back)
         keys[k] = true; keys[e.code] = true;   // the code tells the two shift keys apart
         if (k.length === 1) keys[k.toLowerCase()] = true;
         if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', '/'].includes(k)) e.preventDefault();
@@ -2294,13 +2305,59 @@
       return null;
     }
 
+    // ---------- Controllers ----------
+    // Any gamepad the browser reports drives the game: an Xbox or PlayStation pad, a Steam Deck, or a VR headset's hand
+    // controllers in its browser. With the standard mapping the left stick steers (push forward to thrust), A or the
+    // right trigger thrusts, B or the left trigger boosts, X toggles the nav AI, Y recharges and the bumpers zoom; in the
+    // menus the stick or d-pad moves, A or START confirms and B or BACK goes back. The first pad flies player 1, the
+    // second player 2; online, every pad flies your own ship.
+    const PAD_DEAD = 0.25;
+    const pads = { seen: false, state: [] };
+    window.addEventListener('gamepadconnected', () => { pads.seen = true; });
+    function padRead(gp) {
+      const B = i => { const b = gp.buttons[i]; return !!b && (b.pressed || b.value > 0.5); };
+      const ax = gp.axes || [], a0 = ax[0] || 0, a1 = ax[1] || 0, a2 = ax[2] || 0, a3 = ax[3] || 0;
+      const h = Math.abs(a0) >= Math.abs(a2) ? a0 : a2, v = Math.abs(a1) >= Math.abs(a3) ? a1 : a3;   // whichever stick is pushed
+      const turn = Math.abs(h) > PAD_DEAD ? clamp((h - Math.sign(h) * PAD_DEAD) / (1 - PAD_DEAD), -1, 1) : 0;
+      return { turn, up: v < -0.5 || B(0) || B(7), boost: B(1) || B(6), nav: B(2), charge: B(3), zoomIn: B(5), zoomOut: B(4),
+               confirm: B(0) || B(9), back: B(1) || B(8), left: B(14) || h < -0.6, right: B(15) || h > 0.6, upKey: B(12) || v < -0.6, downKey: B(13) || v > 0.6 };
+    }
+    function padKey(key) { for (const type of ['keydown', 'keyup']) document.dispatchEvent(new KeyboardEvent(type, { key, bubbles: true, cancelable: true })); }   // menus take pad presses as keys
+    const PAD_MENU = [['left', 'ArrowLeft'], ['right', 'ArrowRight'], ['upKey', 'ArrowUp'], ['downKey', 'ArrowDown']];
+    function padTick() {
+      if (!navigator.getGamepads) return;
+      let list; try { list = navigator.getGamepads() || []; } catch (e) { return; }
+      for (const P of players) P.pad = null;
+      let n = 0;
+      for (const gp of list) {
+        if (!gp || !gp.connected) continue;
+        pads.seen = true;
+        const now = padRead(gp), st = pads.state[n] || (pads.state[n] = { held: {}, since: {} });
+        const edge = k => { const was = st.held[k]; st.held[k] = now[k]; if (now[k] && !was) { st.since[k] = game.ticks; return true; } return false; };
+        const repeat = k => now[k] && game.ticks - st.since[k] > 24 && (game.ticks - st.since[k]) % 8 === 0;   // a held direction keeps stepping
+        const P = online() ? localPlayer() : players[Math.min(n, players.length - 1)];
+        const pd = P.pad || (P.pad = { turn: 0, up: false, boost: false, charge: false });
+        if (now.turn) pd.turn = now.turn;
+        pd.up = pd.up || now.up; pd.boost = pd.boost || now.boost; pd.charge = pd.charge || now.charge;
+        const playing = game.state === GAME_STATE.PLAYING;
+        if (edge('nav') && playing) { if (isGuest()) net.navToggles++; usePlayer(P); toggleNav(); }
+        if (edge('zoomIn') && playing) zoomStep(1, P.camera);
+        if (edge('zoomOut') && playing) zoomStep(-1, P.camera);
+        if (edge('confirm') && !playing) padKey('Enter');
+        if (edge('back') && !playing) padKey('Escape');
+        for (const [k, key] of PAD_MENU) if ((edge(k) || repeat(k)) && !playing) padKey(key);
+        n++;
+      }
+    }
+
     // ---------- Touch controls ----------
     // Phones and tablets get a joystick under the left thumb (push forward to thrust, sideways to turn, in proportion)
     // and the console under the right thumb; the booster stays a button. Small chips stand in for the M, F and X keys.
-    let touchUI = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);   // also switched on by the first touch
+    let touchUI = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches) || navigator.maxTouchPoints > 0;   // phones and tablets; a touch switches it on, a real key press off
     const JOY_R = 56, JOY_KNOB = 22;
     const joy = { id: null, dx: 0, dy: 0 };   // the finger on the stick, and the knob's offset as a fraction of JOY_R
     const touchButtons = new Map();            // touch identifier -> the button that finger is holding
+    let lateTouch = null;                      // a lobby button that presses when the finger lifts (copying needs a completed tap)
     function joyCenter() { return { x: 24 + JOY_R, y: H - 24 - JOY_R }; }
     function joyHit(x, y) { const c = joyCenter(); return Math.hypot(x - c.x, y - c.y) <= JOY_R * 1.6; }
     function joyMove(x, y) {
@@ -2384,7 +2441,7 @@
         try { CG.sdk.game.addSettingsChangeListener(s => { if (s && s.muteAudio !== undefined && s.muteAudio !== OrbitalAudio.isMuted()) OrbitalAudio.toggleMute(); }); } catch (e) {}
         let room = null;
         try { room = CG.sdk.game.getInviteParam('room'); } catch (e) {}
-        if (room) { if (netIsSlot(String(room))) netJoin(String(room)); else { lobby.joinCode = String(room).toUpperCase().slice(0, 4); openLobby('join'); } }
+        if (room) { if (netIsSlot(String(room))) netJoin(String(room)); else { lobby.joinCode = String(room).toUpperCase().slice(0, 12); openLobby('join'); } }
         else if (CG.sdk.game.isInstantMultiplayer) { openLobby(null); netHost(false); }   // a party leader: open a private room at once so the party can join
       }).catch(() => {});
     }
@@ -2396,10 +2453,14 @@
     const NET_SNAP_EVERY = 3, NET_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', NET_LIB = 'peerjs.min.js';   // PeerJS 1.5.4 (MIT), shipped with the game
     const NET_SLOTS = 6, NET_PROBE_EVERY = 20000, NET_PROBE_TIMEOUT = 12000;   // public rooms, and how often (ms) a welcome screen looks for them
     const NET_SIGNS = ['VEGA', 'ALTAIR', 'DENEB', 'RIGEL', 'SIRIUS', 'POLLUX', 'CASTOR', 'MIZAR', 'SPICA', 'ANTARES', 'CAPELLA', 'ARCTURUS', 'PROCYON', 'ALGOL', 'MIRA', 'NAOS', 'ATLAS', 'MAIA', 'ELNATH', 'HAMAL', 'REGULUS', 'CANOPUS'];
-    const NET_ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }] };
+    // STUN lets most pairs of browsers find each other; a TURN relay would cover the rest (phones on mobile data, strict
+    // routers). The free Open Relay this used (openrelay.metered.ca) no longer exists, its name points nowhere, so there is
+    // none until one is added here. A join that has not linked up after NET_OPEN_TIMEOUT ms is given up on both sides.
+    const NET_ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] };
+    const NET_OPEN_TIMEOUT = 25000;
     const net = {
       role: null,            // null, 'host' or 'guest'
-      status: '', error: '', code: '', room: '', link: '', peer: null, conn: null, libReady: false, libLoading: false, libWaiters: [],
+      status: '', error: '', code: '', room: '', link: '', connectAt: 0, peer: null, conn: null, libReady: false, libLoading: false, libWaiters: [],
       pub: false, pubFull: false, callSign: '', watchers: [],   // a public host: its room is listed, and welcome screens watching it are told when it fills
       browser: null, slots: {}, busy: {}, browseAt: -1e9, joinName: '',   // looking for public games: one probe connection per room
       rtt: 0, pingSent: 0, lastSnapT: -1, ack: 0, hostMax: 0, hostCleared: 0,
@@ -2407,7 +2468,8 @@
       navToggles: 0, navApplied: 0, events: [], hist: [], notice: '',
     };
     const lobby = { mode: null, joinCode: '' };   // mode: null (choose), 'host' or 'join'
-    const joinInput = document.getElementById('joinCode');
+    const joinInput = document.getElementById('joinCode'), linkInput = document.getElementById('linkBox');
+    function hideNetInputs() { joinInput.style.display = 'none'; linkInput.style.display = 'none'; }
     function online() { return !!net.role; }
     function isHost() { return net.role === 'host'; }
     function isGuest() { return net.role === 'guest'; }
@@ -2442,8 +2504,8 @@
       hoverButton = null; pressedButton = null;
       startButton.style.display = 'none';
       lobby.mode = mode || null; net.error = ''; net.status = '';
-      joinInput.style.display = lobby.mode === 'join' ? 'block' : 'none';
-      if (lobby.mode === 'join') { joinInput.value = lobby.joinCode; setTimeout(() => joinInput.focus(), 0); }
+      hideNetInputs();
+      if (lobby.mode === 'join') { joinInput.style.display = 'block'; joinInput.value = lobby.joinCode; setTimeout(() => joinInput.focus(), 0); }
       OrbitalAudio.startMusic('ambient');
     }
     function netSetup(role) {   // two pilots, one in each browser; both fly with the full keyboard
@@ -2458,7 +2520,7 @@
       for (const c of net.watchers.splice(0)) { try { if (c.open) { c.send(Object.assign(netInfo(), { open: false })); setTimeout(() => { try { c.close(); } catch (e) {} }, 300); } else c.close(); } catch (e) {} }
     }
     function netHost(pub) {   // a public game takes the first free public room; a private one gets a code
-      lobby.mode = 'host'; net.error = ''; net.code = ''; net.room = ''; net.pub = !!pub; net.pubFull = false; joinInput.style.display = 'none';
+      lobby.mode = 'host'; net.error = ''; net.code = ''; net.room = ''; net.link = ''; net.pub = !!pub; net.pubFull = false; hideNetInputs();
       netBrowseStop();
       netLoadLib(() => {
         netSetup('host');
@@ -2479,11 +2541,14 @@
               return;
             }
             if (net.conn) { conn.close(); return; }   // one guest only
-            net.conn = conn;
-            conn.on('open', () => netConnected());
+            net.conn = conn; net.status = 'A pilot is connecting…';
+            let opened = false;   // a join that never opens (the two networks will not link up) is dropped and the room stays open
+            const drop = () => { if (net.conn !== conn || opened) return; net.conn = null; net.status = 'A pilot tried to join but the link failed. Waiting for a pilot…'; try { conn.close(); } catch (e) {} };
+            const timer = setTimeout(drop, NET_OPEN_TIMEOUT);
+            conn.on('open', () => { opened = true; clearTimeout(timer); if (net.conn === conn) netConnected(); });
             conn.on('data', netReceive);
-            conn.on('close', () => netLost('The other pilot left.'));
-            conn.on('error', () => netLost('The connection failed.'));
+            conn.on('close', () => { if (opened) netLost('The other pilot left.'); else drop(); });
+            conn.on('error', () => { if (opened) netLost('The connection failed.'); else drop(); });
           });
           peer.on('error', e => {
             if (net.peer !== peer) return;
@@ -2495,44 +2560,55 @@
         tryRoom();
       });
     }
-    function netJoin(code) {   // a four-letter code, or the id of a public room picked from a list
+    function netJoin(code) {   // a four-letter code, the name of a listed game, or the id of a public room picked from a list
       let room = String(code || '').trim();
       if (netIsSlot(room)) room = room.toLowerCase();
       else {
-        room = room.toUpperCase().replace(/[^A-Z0-9]/g, '');
-        if (room.length !== 4) { net.error = 'A room code has four letters or digits.'; return; }
-        lobby.joinCode = room;
+        const key = room.toUpperCase().replace(/[^A-Z0-9]/g, '');
+        const named = netRooms().find(r => r.name.replace(/\s/g, '') === key);   // a listed game's name typed into the box
+        if (named) room = named.slot;
+        else if (key.length === 4) { room = key; lobby.joinCode = key; }
+        else { net.error = key ? `No game called ${room.toUpperCase()} is listed right now.\nPublic games show on the welcome screen; a private game has a four-letter code.` : 'Type the four-letter code of a private game, or the name of a listed one.'; return; }
       }
       if (online()) return;
       const listed = netRooms().find(r => r.slot === room);
       net.error = ''; net.room = room; net.code = netIsSlot(room) ? '' : room; net.joinName = listed ? listed.name : '';
       netBrowseStop();
       if (game.state !== GAME_STATE.LOBBY) openLobby(netIsSlot(room) ? null : 'join');
+      else if (netIsSlot(room) && lobby.mode === 'join') { lobby.mode = null; hideNetInputs(); }   // a listed game: the JOINING screen
       netLoadLib(() => {
         netSetup('guest');
-        net.status = 'Connecting…';
+        net.status = 'Connecting…'; net.connectAt = performance.now();
         joinInput.blur();
         const peer = net.peer = new Peer({ config: NET_ICE, debug: 0 });
+        let opened = false;
+        const giveUp = () => { if (net.peer === peer && !opened) netFail({ type: 'no-link' }); };   // the two browsers never linked up
+        const timer = setTimeout(giveUp, NET_OPEN_TIMEOUT);
         peer.on('open', () => {
           if (net.peer !== peer) return;
           const conn = net.conn = peer.connect('orbital-' + room, { reliable: true, serialization: 'json' });
-          conn.on('open', () => netConnected());
+          conn.on('open', () => { opened = true; clearTimeout(timer); netConnected(); });
           conn.on('data', netReceive);
-          conn.on('close', () => netLost('The host left.'));
-          conn.on('error', () => netLost('The connection failed.'));
+          conn.on('close', () => { if (opened) netLost('The host left.'); else giveUp(); });
+          conn.on('error', () => { if (opened) netLost('The connection failed.'); else giveUp(); });
         });
-        peer.on('error', e => { if (net.peer === peer) netFail(e); });
+        peer.on('error', e => { if (net.peer === peer) { clearTimeout(timer); netFail(e); } });
       });
     }
     function netFail(e) {
-      const why = e && e.type === 'peer-unavailable' ? (netIsSlot(net.room) ? 'That game is gone.' : `No room with the code ${net.room}.`) : e && e.type === 'network' ? 'Could not reach the lobby server.' : `Connection error${e && e.type ? ` (${e.type})` : ''}.`;
+      const t = e && e.type;
+      const why = t === 'peer-unavailable' ? (netIsSlot(net.room) ? 'That game is gone.' : `No room with the code ${net.room}.`)
+                : t === 'network' ? 'Could not reach the lobby server.'
+                : t === 'no-link' ? 'Could not link up with the host.\nOne of your two networks blocks browser-to-browser links (mobile data often does).\nTry the other pilot hosting, or another network.'
+                : `Connection error${t ? ` (${t})` : ''}.`;
+      const keep = game.state === GAME_STATE.LOBBY && lobby.mode === 'join';   // a bad code: the box stays for another try
       netReset();
-      net.error = why; net.status = '';
-      if (game.state !== GAME_STATE.LOBBY) openLobby(null);
+      openLobby(keep ? 'join' : null);
+      net.error = why;
     }
     function netReset() {   // drop the connection and the peer, back to one pilot
       const peer = net.peer; net.peer = null; net.conn = null;
-      joinInput.style.display = 'none';
+      hideNetInputs();
       cg(g => g.leftRoom());
       netTellWatchers();
       if (peer) { try { peer.destroy(); } catch (e) {} }
@@ -2541,7 +2617,7 @@
     }
     function netConnected() {
       net.status = 'Connected';
-      joinInput.style.display = 'none';
+      hideNetInputs();
       cg(g => g.updateRoom({ isJoinable: false }));
       netTellWatchers();
       OrbitalAudio.sfx.arrive();
@@ -2550,7 +2626,7 @@
     }
     // Looking for public games: the welcome screen and the lobby knock on each public room. A host that is waiting
     // answers with its call sign and keeps the line open, so the row disappears the moment the game fills or ends.
-    function netBrowsing() { return !online() && (game.state === GAME_STATE.WELCOME || (game.state === GAME_STATE.LOBBY && lobby.mode === null)); }
+    function netBrowsing() { return !online() && (game.state === GAME_STATE.WELCOME || (game.state === GAME_STATE.LOBBY && lobby.mode !== 'host')); }
     function netRooms() { return Object.values(net.slots).filter(S => S.info).map(S => S.info); }
     function netProbeDone(slot, busy) {
       const S = net.slots[slot]; if (!S) return;
@@ -2640,7 +2716,8 @@
       const K = me.keys, I = net.input;
       let t = (down(K.right) ? 1 : 0) - (down(K.left) ? 1 : 0), u = down(K.up) ? 1 : 0;
       if (joy.id !== null) { const j = joy.dx / 0.6; if (Math.abs(j) > 0.15) t = clamp(j, -1, 1); if (joy.dy < -0.35) u = 1; }
-      I.s = game.ticks; I.t = r2(t); I.u = u; I.b = down(K.boost) || ui.boost ? 1 : 0; I.c = down(K.charge) || ui.charge ? 1 : 0; I.n = net.navToggles;
+      if (me.pad) { if (me.pad.turn) t = me.pad.turn; if (me.pad.up) u = 1; }
+      I.s = game.ticks; I.t = r2(t); I.u = u; I.b = down(K.boost) || ui.boost || (me.pad && me.pad.boost) ? 1 : 0; I.c = down(K.charge) || ui.charge || (me.pad && me.pad.charge) ? 1 : 0; I.n = net.navToggles;
       if (game.ticks % 2 === 0) netSend({ k: 'i', s: I.s, t: I.t, u: I.u, b: I.b, c: I.c, n: I.n });
     }
     function flyShip(s, flags, n) {   // advance a remote ship n ticks on its own: gravity plus whatever its engines were doing
@@ -2778,19 +2855,24 @@
       { id: 'private', label: 'PRIVATE GAME', key: 'P', color: '#facc15', x: 0, y: 0, w: 200, h: 48, press() { netHost(false); }, release() {}, active: () => false, enabled: () => true, when: () => lobby.mode === null && !online() },
       { id: 'join', label: 'JOIN BY CODE', key: 'J', color: '#fb923c', x: 0, y: 0, w: 200, h: 48, press() { openLobby('join'); }, release() {}, active: () => false, enabled: () => true, when: () => lobby.mode === null && !online() },
       { id: 'connect', label: 'CONNECT', key: 'ENTER', color: '#4fc3f7', x: 0, y: 0, w: 190, h: 48, press() { netJoin(joinInput.value); }, release() {}, active: () => false, enabled: () => !net.role, when: () => lobby.mode === 'join' },
-      { id: 'copy', label: 'COPY LINK', key: 'C', color: '#facc15', x: 0, y: 0, w: 170, h: 40, press() { netCopyLink(); }, release() {}, active: () => false, enabled: () => !!net.room, when: () => lobby.mode === 'host' },
+      { id: 'copy', label: 'COPY LINK', key: 'C', color: '#facc15', x: 0, y: 0, w: 170, h: 40, press() { netCopyLink(); }, release() {}, active: () => false, enabled: () => !!net.link, when: () => lobby.mode === 'host', late: true },
       { id: 'back', label: 'BACK', key: 'ESC', color: '#cbd5e1', x: 0, y: 0, w: 130, h: 40, press() { lobbyBack(); }, release() {}, active: () => false, enabled: () => true, when: () => true },
     ];
     let copyNote = 0;
-    function netCopyLink() {
-      if (!net.room) return;
-      const text = net.link || netLink();
-      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => { copyNote = 120; }, () => {});
+    function netCopyLink() {   // copyNote: > 0 copied, < 0 the clipboard was refused and the link is left selected for a hand copy
+      if (!net.link) return;
+      const text = net.link;
       OrbitalAudio.sfx.select();
+      let ok = false;   // the selection route works inside game-page frames (itch.io) where the Clipboard API is refused
+      try { linkInput.style.display = 'block'; if (linkInput.value !== text) linkInput.value = text; linkInput.focus(); linkInput.select(); linkInput.setSelectionRange(0, text.length); ok = document.execCommand('copy'); linkInput.blur(); } catch (e) { ok = false; }
+      if (ok) { copyNote = 150; return; }
+      const fail = () => { copyNote = -300; try { linkInput.focus(); linkInput.select(); } catch (e) {} };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => { copyNote = 150; }, fail);
+      else fail();
     }
     function lobbyBack() {
       if (online()) netReset();   // a room being opened or joined is abandoned
-      if (lobby.mode === null) { joinInput.style.display = 'none'; toWelcome(); return; }
+      if (lobby.mode === null) { hideNetInputs(); toWelcome(); return; }
       openLobby(null);
     }
     function lobbyButtonAt(x, y) { return roomRowAt(x, y) || lobbyButtons.find(b => b.when() && hit(b, x, y)) || null; }
@@ -2845,6 +2927,7 @@
       ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '14px monospace';
       ctx.fillText('TWO PILOTS, TWO BROWSERS. THE HOST PICKS THE SYSTEMS.', W / 2, short ? 54 : 72);
       const cy = H / 2 - (short ? 20 : 30);
+      if (lobby.mode !== null) { roomRows.length = 0; roomMore.on = false; }   // no stale rows to tap
       if (lobby.mode === null) {
         ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.font = '15px monospace';
         ctx.fillText('Host a game and anyone who opens Orbital can join it from the welcome screen.', W / 2, short ? 80 : cy - 96);
@@ -2865,37 +2948,46 @@
         if (W >= 720) { h.x = W / 2 - h.w - 12 - p.w / 2; p.x = W / 2 - p.w / 2; j.x = W / 2 + p.w / 2 + 12; h.y = p.y = j.y = by; }
         else { h.x = p.x = j.x = W / 2 - h.w / 2; h.y = by; p.y = by + 56; j.y = by + 112; }
         if (!online()) { drawButton(h); drawButton(p); drawButton(j); }
-      } else if (lobby.mode === 'host') {
+      } else if (lobby.mode === 'host') {   // a public game is listed under a call sign (a name, not a code); a private one has a code
         ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '15px monospace';
-        if (net.pub) {
-          ctx.fillText('YOUR GAME IS LISTED FOR ANYONE TO JOIN', W / 2, cy - 70);
-          ctx.fillStyle = net.room ? '#facc15' : 'rgba(255,255,255,0.3)'; ctx.font = 'bold 48px monospace';
-          ctx.fillText(net.room ? net.callSign : '· · ·', W / 2, cy - 10);
-          ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '14px monospace';
-          if (net.room) { ctx.fillText(`It shows on the welcome screen of everyone who opens Orbital. Or send ${net.link.length > 90 ? 'an invite link:' : 'this link:'}`, W / 2, cy + 44); ctx.fillStyle = '#4fc3f7'; if (net.link.length <= 90) ctx.fillText(net.link, W / 2, cy + 66); }
-        } else {
-          ctx.fillText(net.pubFull ? 'EVERY PUBLIC ROOM IS BUSY, SO THIS GAME IS PRIVATE' : 'YOUR ROOM CODE', W / 2, cy - 70);
-          ctx.fillStyle = net.code ? '#facc15' : 'rgba(255,255,255,0.3)'; ctx.font = 'bold 72px monospace';
-          ctx.fillText(net.code ? net.code.split('').join(' ') : '· · · ·', W / 2, cy - 10);
-          ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '14px monospace';
-          if (net.code) { ctx.fillText(`Tell the other pilot the code, or send them ${net.link.length > 90 ? 'an invite link:' : 'this link:'}`, W / 2, cy + 44); ctx.fillStyle = '#4fc3f7'; if (net.link.length <= 90) ctx.fillText(net.link, W / 2, cy + 66); }
-        }
-        const c = lobbyButtons[4]; c.x = W / 2 - c.w / 2; c.y = cy + (net.link.length > 90 ? 66 : 90); c.label = copyNote > 0 ? 'LINK COPIED' : 'COPY LINK';
-        drawButton(c);
-        if (copyNote > 0) copyNote--;
+        ctx.fillText(net.pub ? 'YOUR GAME IS LISTED AS' : net.pubFull ? 'EVERY PUBLIC ROOM IS BUSY, SO THIS GAME IS PRIVATE' : 'YOUR ROOM CODE', W / 2, cy - 70);
+        ctx.fillStyle = net.room ? '#facc15' : 'rgba(255,255,255,0.3)'; ctx.font = net.pub ? 'bold 44px monospace' : 'bold 72px monospace';
+        ctx.letterSpacing = net.pub ? '0px' : '14px';
+        ctx.fillText(net.room ? (net.pub ? net.callSign : net.code) : net.pub ? '· · ·' : '····', W / 2, cy - 10);
+        ctx.letterSpacing = '0px';
+        if (net.link) {
+          ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = short ? '13px monospace' : '14px monospace';
+          const pitch = short ? 18 : 20;
+          const lines = !net.pub ? ['Tell the other pilot the code, or send them this link:']
+                      : short ? ['Everyone who opens Orbital sees it on the welcome screen. No code needed.', 'Or send this link:']
+                      : ['Anyone who opens Orbital sees it on the welcome screen and taps JOIN. There is no code to type.', 'Or send them this link:'];
+          lines.forEach((l, i) => ctx.fillText(l, W / 2, cy + 32 + i * pitch));
+          const ly = cy + 32 + lines.length * pitch + 12;   // the link itself is an input, so it can be selected by hand
+          linkInput.style.display = 'block'; linkInput.style.top = `${ly}px`;
+          if (linkInput.value !== net.link) linkInput.value = net.link;
+          const c = lobbyButtons[4]; c.label = copyNote > 0 ? 'LINK COPIED' : copyNote < 0 ? 'COPY FAILED · SELECT IT ABOVE' : 'COPY LINK'; c.w = copyNote < 0 ? 300 : 170;
+          c.x = W / 2 - c.w / 2; c.y = ly + 26; drawButton(c);
+          if (copyNote > 0) copyNote--; else if (copyNote < 0) copyNote++;
+        } else linkInput.style.display = 'none';
       } else if (lobby.mode === 'join') {
         ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '15px monospace';
-        ctx.fillText('ENTER THE HOST\'S ROOM CODE', W / 2, cy - 70);
+        ctx.fillText('ENTER THE FOUR-LETTER CODE OF A PRIVATE GAME', W / 2, cy - 70);
         joinInput.style.top = `${cy - 10}px`;
-        const c = lobbyButtons[3]; c.x = W / 2 - c.w / 2; c.y = cy + 50;
-        drawButton(c);
+        const c = lobbyButtons[3]; c.x = W / 2 - c.w / 2; c.y = cy + 50; drawButton(c);
+        const max = short ? 0 : Math.min(3, Math.floor((H - 150 - (cy + 136)) / 32));   // the public games are a tap away here too
+        if (max > 0 && netRooms().length) { ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.font = '13px monospace'; ctx.fillText('OR JOIN A LISTED GAME:', W / 2, cy + 122); }
+        if (max > 0) drawRoomRows(W / 2, cy + 136, max);
       }
-      ctx.textAlign = 'center'; ctx.font = '15px monospace';
-      if (net.error) { ctx.fillStyle = '#ff5252'; ctx.fillText(net.error, W / 2, H - (short ? 84 : 120)); }
-      else if (net.status) { ctx.fillStyle = `rgba(79,195,247,${0.6 + 0.4 * Math.sin(t * 0.1)})`; ctx.fillText(net.status, W / 2, H - (short ? 84 : 120)); }
-      const back = lobbyButtons[5]; back.x = 16; back.y = H - 56; drawButton(back);
-      ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace';
-      ctx.fillText('Browsers connect to each other directly; a few networks block that, in which case try the other pilot hosting.', W / 2, H - 18);
+      ctx.textAlign = 'center'; ctx.font = short ? '13px monospace' : '15px monospace';
+      const sy = short ? H - 54 : H - 130, pitch = short ? 18 : 20;
+      if (net.error) { ctx.fillStyle = '#ff5252'; net.error.split('\n').forEach((l, i) => ctx.fillText(l, W / 2, sy + i * pitch)); }
+      else if (net.status) {
+        const slow = net.status === 'Connecting…' && performance.now() - net.connectAt > 6000;
+        ctx.fillStyle = `rgba(79,195,247,${0.6 + 0.4 * Math.sin(t * 0.1)})`;
+        ctx.fillText(slow ? `Still connecting… a few networks block browser-to-browser links. It gives up after ${NET_OPEN_TIMEOUT / 1000} s.` : net.status, W / 2, sy);
+      }
+      const back = lobbyButtons[5]; back.x = 16; back.y = short ? 14 : H - 56; drawButton(back);
+      if (!short) { ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px monospace'; ctx.fillText('Browsers connect to each other directly; a few networks block that, in which case try the other pilot hosting.', W / 2, H - 18); }
       ctx.restore();
     }
     const introBack = { x: 0, y: 0, w: 0, h: 0, press() { if (game.levelIndex < 0) openCustom(); else openMap(game.levelIndex); } };   // the way back from the intro card
@@ -3195,6 +3287,7 @@
       if (players.length > 1 && !online()) notes.push(...players.map(p => `${p.name}:  ${KEY_HELP[p.name]}`));   // who presses what
       if (online()) notes.push(`ONLINE  ·  YOU ARE ${localPlayer().name}  ·  ${isHost() ? 'THE OTHER PILOT IS' : 'THE HOST IS'} ${otherPlayers()[0].name}`);
       if (game.levelIndex === 0) notes.push(touchUI ? 'ZOOM  ·  pinch with two fingers, or the + and − buttons by the map' : 'ZOOM  ·  mouse wheel or touchpad scroll, the + and − keys, or the buttons by the map');
+      if (game.levelIndex === 0 && pads.seen) notes.push('CONTROLLER  ·  stick steers and thrusts, A thrust, B boost, X nav AI, Y recharge, bumpers zoom');
       if (notes.length) {   // new mechanics introduced on this level
         ctx.fillStyle = '#facc15'; ctx.font = `${px(14)} monospace`;
         notes.forEach((line, i) => { ctx.fillStyle = line.startsWith('P1') ? '#4fc3f7' : line.startsWith('P2') ? '#fb923c' : '#facc15'; ctx.fillText(line, W / 2, H / 2 + 112 * k + i * 20 * f); });
@@ -3321,8 +3414,10 @@
         ctx.fillStyle = '#4fc3f7'; ctx.fillText(`P1  ${KEY_HELP.P1}`, cx, H - 70);
         ctx.fillStyle = '#fb923c'; ctx.fillText(`P2  ${KEY_HELP.P2}`, cx, H - 48);
         ctx.fillStyle = 'rgba(255,255,255,0.75)';
+        if (pads.seen) ctx.fillText('OR A CONTROLLER EACH: THE FIRST PAD FLIES P1, THE SECOND P2', cx, H - 92);
       } else {
         ctx.fillText(touchUI ? 'JOYSTICK  push forward to thrust, sideways to turn     BOOSTER  hold the button     PINCH or + −  zoom'
+                   : pads.seen ? 'CONTROLLER  stick steers & thrusts     A / RT  thrust     B / LT  booster     X  nav AI     Y  recharge     LB / RB  zoom     START  launch'
                              : 'ARROWS / WASD  steer & thrust     SPACE  booster     SCROLL or + −  zoom     F  camera follow     M  music     X  abandon run', cx, H - 48);
       }
       ctx.fillText(`${LEVELS.length} STAR SYSTEMS   ·   SOUND ${OrbitalAudio.isMuted() ? 'OFF' : 'ON'}`, cx, H - 26);
@@ -3557,7 +3652,7 @@
       game.ticks++; game.stateTimer++;
       updateParticles(); updatePopups();
       for (const P of players) { const c = P.camera; if (c.shake > 0) { c.shake *= 0.88; if (c.shake < 0.3) c.shake = 0; } }
-      netBrowseTick();
+      netBrowseTick(); padTick();
       if (isGuest()) { guestTick(); return; }
       tickLocal();
       if (isHost()) netHostTick();
@@ -3654,7 +3749,7 @@
     addListeners();
     loadCustom();
     const joinParam = new URLSearchParams(location.search).get('join');   // an invite link: straight to the lobby with the code filled in
-    if (joinParam) { if (netIsSlot(joinParam)) netJoin(joinParam); else { lobby.joinCode = joinParam.toUpperCase().slice(0, 4); openLobby('join'); } }
+    if (joinParam) { if (netIsSlot(joinParam)) netJoin(joinParam); else { lobby.joinCode = joinParam.toUpperCase().slice(0, 12); openLobby('join'); } }
     cgInit();
     const devLevel = parseInt(new URLSearchParams(location.search).get('level'));
     if (devLevel >= 1 && devLevel <= LEVELS.length) { newGame(devLevel - 1); beginPlay(); }
