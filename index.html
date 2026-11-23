@@ -10,7 +10,7 @@
     canvas { display: block; cursor: grab; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
     @font-face {
       font-family: 'SpaceFont';
-      src: url('https://fonts.gstatic.com/s/quantico/v15/rax5HiSdp9cPL3km3mujm9_1kw.woff2') format('woff2');
+      src: url('quantico.woff2') format('woff2');   /* Quantico (SIL Open Font License), shipped with the game */
       font-display: swap;
     }
     .start-button {
@@ -2357,7 +2357,7 @@
     // in one of six fixed rooms that every welcome screen quietly knocks on, so it shows up there for anyone to join;
     // a private game gets a four-letter code instead. The host runs the whole simulation and sends the state twenty
     // times a second; the guest sends its controls, flies its own ship between snapshots, and draws what it is told.
-    const NET_SNAP_EVERY = 3, NET_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', NET_LIB = 'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';
+    const NET_SNAP_EVERY = 3, NET_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', NET_LIB = 'peerjs.min.js';   // PeerJS 1.5.4 (MIT), shipped with the game
     const NET_SLOTS = 6, NET_PROBE_EVERY = 20000, NET_PROBE_TIMEOUT = 12000;   // public rooms, and how often (ms) a welcome screen looks for them
     const NET_SIGNS = ['VEGA', 'ALTAIR', 'DENEB', 'RIGEL', 'SIRIUS', 'POLLUX', 'CASTOR', 'MIZAR', 'SPICA', 'ANTARES', 'CAPELLA', 'ARCTURUS', 'PROCYON', 'ALGOL', 'MIRA', 'NAOS', 'ATLAS', 'MAIA', 'ELNATH', 'HAMAL', 'REGULUS', 'CANOPUS'];
     const NET_ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }] };
