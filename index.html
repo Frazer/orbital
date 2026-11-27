@@ -2580,10 +2580,15 @@
           peer.on('open', () => { if (net.peer !== peer) return; net.status = net.pub ? 'Listed for everyone. Waiting for a pilot…' : 'Waiting for a pilot to join…'; cg(g => g.updateRoom({ roomId: net.room, isJoinable: true, inviteParams: { room: net.room } })); net.link = netLink(); });
           peer.on('connection', conn => {
             if (net.peer !== peer) return;
-            if (conn.metadata && conn.metadata.browse) {   // a welcome screen asking who is here
+            if (conn.metadata && conn.metadata.browse) {   // a welcome screen asking who is here; a click there joins over this same channel
               conn.on('open', () => { if (net.peer !== peer) { conn.close(); return; } try { conn.send(netInfo()); } catch (e) {} if (net.conn) setTimeout(() => { try { conn.close(); } catch (e) {} }, 300); else net.watchers.push(conn); });
               const drop = () => { const i = net.watchers.indexOf(conn); if (i >= 0) net.watchers.splice(i, 1); };
               conn.on('close', drop); conn.on('error', drop);
+              conn.on('data', m => {
+                if (net.peer !== peer || !m || m.k !== 'join') return;
+                if (net.conn) { try { conn.send({ k: 'full' }); } catch (e) {} return; }   // somebody else got here first
+                drop(); netAdopt(conn);
+              });
               return;
             }
             if (net.conn) { conn.close(); return; }   // one guest only
@@ -2601,10 +2606,38 @@
             if (e.type === 'unavailable-id') { peer.destroy(); tryRoom(); return; }   // somebody has that room: take another
             netFail(e);
           });
-          peer.on('disconnected', () => { if (net.peer === peer && !net.conn) peer.reconnect(); });
+          peer.on('disconnected', () => { if (net.peer === peer && !peer.destroyed && game.state === GAME_STATE.LOBBY) { try { peer.reconnect(); } catch (e) {} } });   // the broker socket dropped (sleep, a network blip): sign in again so codes and links keep working
         };
         tryRoom();
       });
+    }
+    function netAdopt(conn) {   // the host takes a watcher's open channel as the game connection: the listing proved it works
+      net.conn = conn;
+      conn.on('data', netReceive);
+      conn.on('close', () => { if (net.conn === conn) netLost('The other pilot left.'); });
+      conn.on('error', () => { if (net.conn === conn) netLost('The connection failed.'); });
+      netConnected();
+    }
+    function netJoinOver(conn, peer) {   // the guest joins a listed game over the channel its listing came on: no second negotiation, no broker in between
+      netSetup('guest');
+      net.peer = peer; net.conn = conn;
+      net.status = 'Joining…'; net.connectAt = performance.now();
+      joinInput.blur();
+      let accepted = false;
+      const giveUp = why => { if (net.conn === conn && !accepted) { accepted = true; netFail({ type: why }); } };
+      const timer = setTimeout(() => giveUp('no-answer'), NET_OPEN_TIMEOUT);
+      conn.on('data', m => {
+        if (net.conn !== conn || !m) return;
+        if (!accepted) {
+          if (m.k === 'full' || (m.k === 'info' && !m.open)) { clearTimeout(timer); giveUp('full'); return; }
+          if (m.k !== 'map') return;   // the host's first map message is its welcome
+          accepted = true; clearTimeout(timer); netConnected();
+        }
+        netReceive(m);
+      });
+      conn.on('close', () => { if (net.conn !== conn) return; if (accepted) netLost('The host left.'); else giveUp('no-answer'); });
+      conn.on('error', () => { if (net.conn !== conn) return; if (accepted) netLost('The connection failed.'); else giveUp('no-answer'); });
+      try { conn.send({ k: 'join' }); } catch (e) { giveUp('no-answer'); }
     }
     function netJoin(code) {   // a four-letter code, the name of a listed game, or the id of a public room picked from a list
       let room = String(code || '').trim();
@@ -2619,9 +2652,12 @@
       if (online()) return;
       const listed = netRooms().find(r => r.slot === room);
       net.error = ''; net.room = room; net.code = netIsSlot(room) ? '' : room; net.joinName = listed ? listed.name : '';
-      netBrowseStop();
+      const S = net.slots[room], probe = S && S.info && S.conn && S.conn.open ? S.conn : null;   // a listed game: its row came over a channel that already works
+      if (probe) delete net.slots[room];
+      const browser = netBrowseStop(!!probe);
       if (game.state !== GAME_STATE.LOBBY) openLobby(netIsSlot(room) ? null : 'join');
       else if (netIsSlot(room) && lobby.mode === 'join') { lobby.mode = null; hideNetInputs(); }   // a listed game: the JOINING screen
+      if (probe) { netJoinOver(probe, browser); return; }
       netLoadLib(() => {
         netSetup('guest');
         net.status = 'Connecting…'; net.connectAt = performance.now();
@@ -2646,6 +2682,8 @@
       const why = t === 'peer-unavailable' ? (netIsSlot(net.room) ? 'That game is gone.' : `No room with the code ${net.room}.`)
                 : t === 'network' ? 'Could not reach the lobby server.'
                 : t === 'no-link' ? 'Could not link up with the host.\nOne of your two networks blocks browser-to-browser links (mobile data often does).\nTry the other pilot hosting, or another network.'
+                : t === 'no-answer' ? 'The host did not answer.\nTheir game may be paused in a background tab or behind a locked screen.\nAsk them to bring it to the front, then try again.'
+                : t === 'full' ? 'Somebody else just joined that game.'
                 : `Connection error${t ? ` (${t})` : ''}.`;
       const keep = game.state === GAME_STATE.LOBBY && lobby.mode === 'join';   // a bad code: the box stays for another try
       netReset();
@@ -2677,7 +2715,7 @@
     function netProbeDone(slot, busy) {
       const S = net.slots[slot]; if (!S) return;
       delete net.slots[slot];
-      if (busy) net.busy[slot] = performance.now() + 60000;   // a game is on in there: no point asking again for a while
+      if (busy) net.busy[slot] = performance.now() + 30000;   // a game is on in there: no point asking again for a while (it may reopen if the guest leaves early)
       try { S.conn.close(); } catch (e) {}
     }
     function netBrowse() {
@@ -2712,17 +2750,29 @@
       for (const slot in net.slots) { const S = net.slots[slot]; if (!S.info && now - S.at > NET_PROBE_TIMEOUT) netProbeDone(slot, false); }
       if (now - net.browseAt >= NET_PROBE_EVERY && !document.hidden) { net.browseAt = now; netBrowse(); }
     }
-    function netBrowseStop() {
+    function netBrowseStop(keepPeer) {   // keepPeer: the browse Peer is handed over as the game peer (a join over a probe channel); returns it
       const peer = net.browser; net.browser = null;
       for (const slot in net.slots) netProbeDone(slot, false);
       net.browseAt = -1e9;
-      if (peer) { try { peer.destroy(); } catch (e) {} }
+      if (peer && !keepPeer) { try { peer.destroy(); } catch (e) {} }
+      return peer;
     }
     function netLost(why) {   // the other side went away: the run is over
       if (!online()) return;
+      if (isHost() && !game.inRun && (game.state === GAME_STATE.MAP || game.state === GAME_STATE.LOBBY) && net.peer && !net.peer.destroyed) { netReopen(why); return; }   // nothing had started: the room stays open for the next pilot
       netReset();
       net.notice = why;
       toWelcome();
+    }
+    function netReopen(why) {   // the host goes back to waiting in the same room, still signed in with the broker under the same id
+      const conn = net.conn; net.conn = null;
+      if (conn) { try { conn.close(); } catch (e) {} }
+      netSetup('host');
+      game.state = GAME_STATE.LOBBY; game.stateTimer = 0; game.level = null; game.inRun = false; map.travel = null;
+      lobby.mode = 'host'; hideNetInputs(); startButton.style.display = 'none';
+      net.status = `${why} Waiting for a pilot…`; net.error = '';
+      cg(g => g.updateRoom({ roomId: net.room, isJoinable: true, inviteParams: { room: net.room } }));
+      OrbitalAudio.startMusic('ambient');
     }
     function netLeave() {   // this side quits
       if (!online()) return;
@@ -3511,6 +3561,7 @@
         ctx.fillText(c.label, c.x + c.w / 2, c.y + c.h / 2 + 1);
       });
       const top = y + 42, maxRows = Math.floor((H - 62 - top) / 32), rooms = netRooms().length;
+      if (!rooms) { roomRows.length = 0; roomMore.on = false; }   // no stale rows to tap once the games are gone
       const used = rooms ? drawRoomRows(cx, maxRows >= 1 ? top : y + 36, maxRows) : 0;
       if (net.notice && !rooms) { ctx.fillStyle = '#fb923c'; ctx.font = '14px monospace'; ctx.fillText(net.notice, cx, y + 50); }
       ctx.restore();
